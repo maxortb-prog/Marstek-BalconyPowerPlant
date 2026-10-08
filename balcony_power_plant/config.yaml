@@ -1,0 +1,85 @@
+name: BalconyPowerPlant
+version: "0.1.0"
+slug: balcony_power_plant
+description: >-
+  Local UDP bridge between a Marstek Venus battery (Open API Rev 2.0)
+  and Home Assistant via MQTT discovery.
+url: https://github.com/maxortb-prog/Marstek-BalconyPowerPlant
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+host_network: true
+hassio_api: true
+services:
+  - mqtt:want
+options:
+  # --- Device ---
+  device_ip: "192.168.0.45"
+  device_udp_port: 30000
+  device_ble_mac: ""
+  device_type: ""
+  udp_local_port: 0
+  max_power: "800"
+  # --- MQTT ---
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_username: "mqtt-marstek"
+  mqtt_password: "mqtt-marstek"
+  mqtt_discovery_prefix: "homeassistant"
+  mqtt_base_topic: "Marstek-Bridge-Control"
+  mqtt_suggested_area: "Marstek"
+  # --- Communication (also changeable at runtime in HA) ---
+  queue_enabled: true
+  request_delay: 2
+  request_timeout: 5
+  request_retries: 0
+  # --- Device settings (changeable at runtime in HA) ---
+  dod: 88
+  led: true
+  ble_adv: false
+  passive_power: 0
+  passive_cd_time: 300
+  # --- Enabled queries (changeable at runtime in HA) ---
+  query_device: true
+  query_wifi: true
+  query_ble: true
+  query_battery: true
+  query_pv: true
+  query_es_status: true
+  query_es_mode: true
+  # --- Logging ---
+  log_level: info
+schema:
+  device_ip: str
+  device_udp_port: port
+  device_ble_mac: "str?"
+  device_type: "str?"
+  udp_local_port: int(0,65535)
+  max_power: list(800|1200)
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_username: "str?"
+  mqtt_password: "password?"
+  mqtt_discovery_prefix: str
+  mqtt_base_topic: str
+  mqtt_suggested_area: "str?"
+  queue_enabled: bool
+  request_delay: float(0,60)
+  request_timeout: float(1,120)
+  request_retries: int(0,20)
+  dod: int(30,88)
+  led: bool
+  ble_adv: bool
+  passive_power: int(-1200,1200)
+  passive_cd_time: int(0,86400)
+  query_device: bool
+  query_wifi: bool
+  query_ble: bool
+  query_battery: bool
+  query_pv: bool
+  query_es_status: bool
+  query_es_mode: bool
+  log_level: list(trace|debug|info|warning|error)

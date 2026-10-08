@@ -1,0 +1,89 @@
+configuration:
+  device_ip:
+    name: "Device IP"
+    description: "IP address of the Marstek device (static IP recommended)."
+  device_udp_port:
+    name: "Device UDP port"
+    description: "Open API UDP port set in the Marstek app (default 30000)."
+  device_ble_mac:
+    name: "Device BLE MAC"
+    description: "Leave empty: filled in automatically after the first successful read."
+  device_type:
+    name: "Device type"
+    description: "Leave empty: filled in automatically after the first successful read."
+  udp_local_port:
+    name: "Local UDP port"
+    description: "Local port for answers. 0 = any free port. Set to 30000 if the device always answers to its own port."
+  max_power:
+    name: "Maximum power"
+    description: "Limit for the passive power slider in W (800 or 1200)."
+  mqtt_host:
+    name: "MQTT host"
+    description: "Broker host, e.g. core-mosquitto (or 127.0.0.1)."
+  mqtt_port:
+    name: "MQTT port"
+    description: "Broker port."
+  mqtt_username:
+    name: "MQTT username"
+  mqtt_password:
+    name: "MQTT password"
+  mqtt_discovery_prefix:
+    name: "MQTT discovery prefix"
+    description: "Home Assistant discovery prefix."
+  mqtt_base_topic:
+    name: "MQTT base topic"
+    description: "Base topic for states and commands."
+  mqtt_suggested_area:
+    name: "Suggested area"
+    description: "Area suggested for the HA device."
+  queue_enabled:
+    name: "Request queue"
+    description: "ON: send one after another with delay/timeout/retries. OFF: send immediately (fire mode)."
+  request_delay:
+    name: "Request delay"
+    description: "Seconds between two requests (queue mode)."
+  request_timeout:
+    name: "Request timeout"
+    description: "Seconds to wait for an answer."
+  request_retries:
+    name: "Request retries"
+    description: "0 = no watchdog. >0 = after this many failed retries Communication goes to FAIL (queue mode only)."
+  dod:
+    name: "Depth of discharge"
+    description: "DOD in % (30-88). Sent at every start."
+  led:
+    name: "LED"
+    description: "LED on/off. Sent at every start."
+  ble_adv:
+    name: "Bluetooth advertising"
+    description: "Bluetooth advertising on/off. Sent at every start."
+  passive_power:
+    name: "Passive power"
+    description: "W, positive = feed in, negative = charge."
+  passive_cd_time:
+    name: "Passive countdown"
+    description: "Seconds the passive power stays active (cd_time)."
+  query_device:
+    name: "Enable device info"
+    description: "Marstek.GetDevice"
+  query_wifi:
+    name: "Enable WiFi status"
+    description: "Wifi.GetStatus"
+  query_ble:
+    name: "Enable Bluetooth status"
+    description: "BLE.GetStatus"
+  query_battery:
+    name: "Enable battery status"
+    description: "Bat.GetStatus"
+  query_pv:
+    name: "Enable PV status"
+    description: "PV.GetStatus"
+  query_es_status:
+    name: "Enable energy system status"
+    description: "ES.GetStatus"
+  query_es_mode:
+    name: "Enable energy system mode"
+    description: "ES.GetMode"
+  log_level:
+    name: "Log level"
+    description: "trace, debug, info, warning, error"

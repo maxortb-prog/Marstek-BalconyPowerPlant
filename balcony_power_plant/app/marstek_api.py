@@ -1,0 +1,225 @@
+"""Marstek Open API (Rev 2.0) definitions and a tolerant JSON parser.
+
+EN: Method names, parameter builders and the list of readable fields per query.
+DE: Methodennamen, Parameter-Builder und die lesbaren Felder je Abfrage.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Readable queries ("functions"). Each one can be enabled/disabled in HA.
+# Lesbare Abfragen. Jede kann im HA ein-/ausgeschaltet werden.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Field:
+    key: str                      # key in the device result
+    name: str                     # HA entity name (English)
+    component: str = "sensor"     # sensor | binary_sensor
+    unit: str | None = None
+    device_class: str | None = None
+    state_class: str | None = None
+    diagnostic: bool = False
+    icon: str | None = None
+    numeric: bool = True
+
+
+@dataclass(frozen=True)
+class Query:
+    key: str                      # internal key, also option name query_<key>
+    method: str                   # Open API method
+    label: str                    # human readable (English)
+    fields: tuple[Field, ...] = field(default_factory=tuple)
+
+
+def _pv_fields() -> tuple[Field, ...]:
+    out: list[Field] = []
+    for i in range(1, 5):
+        out += [
+            Field(f"pv{i}_power", f"PV{i} power", unit="W", device_class="power",
+                  state_class="measurement"),
+            Field(f"pv{i}_voltage", f"PV{i} voltage", unit="V", device_class="voltage",
+                  state_class="measurement", diagnostic=True),
+            Field(f"pv{i}_current", f"PV{i} current", unit="A", device_class="current",
+                  state_class="measurement", diagnostic=True),
+            Field(f"pv{i}_state", f"PV{i} working", component="binary_sensor",
+                  device_class="running", diagnostic=True),
+        ]
+    return tuple(out)
+
+
+QUERIES: dict[str, Query] = {
+    "device": Query("device", "Marstek.GetDevice", "Device info", (
+        Field("device", "Device model", diagnostic=True, numeric=False, icon="mdi:battery-charging-high"),
+        Field("ver", "Firmware version", diagnostic=True, numeric=False, icon="mdi:chip"),
+        Field("ble_mac", "Bluetooth MAC", diagnostic=True, numeric=False, icon="mdi:bluetooth"),
+        Field("wifi_mac", "WiFi MAC", diagnostic=True, numeric=False, icon="mdi:wifi"),
+        Field("wifi_name", "WiFi name", diagnostic=True, numeric=False, icon="mdi:wifi"),
+        Field("ip", "IP address", diagnostic=True, numeric=False, icon="mdi:ip-network"),
+    )),
+    "wifi": Query("wifi", "Wifi.GetStatus", "WiFi status", (
+        Field("ssid", "WiFi SSID", diagnostic=True, numeric=False, icon="mdi:wifi"),
+        Field("rssi", "WiFi signal", unit="dBm", device_class="signal_strength",
+              state_class="measurement", diagnostic=True),
+        Field("sta_ip", "WiFi IP", diagnostic=True, numeric=False, icon="mdi:ip-network"),
+        Field("sta_gate", "WiFi gateway", diagnostic=True, numeric=False, icon="mdi:router-network"),
+        Field("sta_mask", "WiFi subnet mask", diagnostic=True, numeric=False, icon="mdi:ip-network"),
+        Field("sta_dns", "WiFi DNS", diagnostic=True, numeric=False, icon="mdi:dns"),
+    )),
+    "ble": Query("ble", "BLE.GetStatus", "Bluetooth status", (
+        Field("state", "Bluetooth state", diagnostic=True, numeric=False, icon="mdi:bluetooth-connect"),
+        Field("ble_mac", "Bluetooth status MAC", diagnostic=True, numeric=False, icon="mdi:bluetooth"),
+    )),
+    "battery": Query("battery", "Bat.GetStatus", "Battery status", (
+        Field("soc", "Battery SOC", unit="%", device_class="battery", state_class="measurement"),
+        Field("bat_temp", "Battery temperature", unit="°C", device_class="temperature",
+              state_class="measurement"),
+        Field("bat_capacity", "Battery remaining capacity", unit="Wh",
+              device_class="energy_storage", state_class="measurement"),
+        Field("rated_capacity", "Battery rated capacity", unit="Wh",
+              device_class="energy_storage", diagnostic=True),
+        Field("charg_flag", "Charging allowed", component="binary_sensor", diagnostic=True),
+        Field("dischrg_flag", "Discharging allowed", component="binary_sensor", diagnostic=True),
+    )),
+    "pv": Query("pv", "PV.GetStatus", "PV status", _pv_fields()),
+    "es_status": Query("es_status", "ES.GetStatus", "Energy system status", (
+        Field("bat_soc", "System SOC", unit="%", device_class="battery", state_class="measurement"),
+        Field("bat_cap", "System battery capacity", unit="Wh", device_class="energy_storage",
+              diagnostic=True),
+        Field("pv_power", "PV power", unit="W", device_class="power", state_class="measurement"),
+        Field("ongrid_power", "Grid power", unit="W", device_class="power", state_class="measurement"),
+        Field("offgrid_power", "Off-grid power", unit="W", device_class="power",
+              state_class="measurement"),
+        Field("bat_power", "Battery power", unit="W", device_class="power", state_class="measurement"),
+        Field("total_pv_energy", "Total PV energy", unit="Wh", device_class="energy",
+              state_class="total_increasing"),
+        Field("total_grid_output_energy", "Total grid output energy", unit="Wh",
+              device_class="energy", state_class="total_increasing"),
+        Field("total_grid_input_energy", "Total grid input energy", unit="Wh",
+              device_class="energy", state_class="total_increasing"),
+        Field("total_load_energy", "Total load energy", unit="Wh", device_class="energy",
+              state_class="total_increasing"),
+    )),
+    "es_mode": Query("es_mode", "ES.GetMode", "Energy system mode", (
+        Field("mode", "Device operating mode", numeric=False, icon="mdi:cog-transfer"),
+        Field("ct_state", "CT connected", component="binary_sensor", diagnostic=True),
+    )),
+}
+
+MODES = ("Auto", "AI", "UPS", "Passive")
+
+# ---------------------------------------------------------------------------
+# Parameter builders. "instance" is params.id (counts globally like the request id).
+# ---------------------------------------------------------------------------
+
+
+def query_params(query: Query, instance: int, ble_mac: str) -> dict[str, Any]:
+    if query.method == "Marstek.GetDevice":
+        return {"ble_mac": ble_mac or "0"}
+    return {"id": instance}
+
+
+def set_mode_params(instance: int, mode: str, power: int, cd_time: int) -> dict[str, Any]:
+    if mode == "Auto":
+        cfg: dict[str, Any] = {"mode": "Auto", "auto_cfg": {"enable": 1}}
+    elif mode == "AI":
+        cfg = {"mode": "AI", "ai_cfg": {"enable": 1}}
+    elif mode == "UPS":
+        cfg = {"mode": "UPS", "ups_cfg": {"enable": 1}}
+    elif mode == "Passive":
+        cfg = {"mode": "Passive", "passive_cfg": {"power": int(power), "cd_time": int(cd_time)}}
+    else:
+        raise ValueError(f"Unknown mode {mode!r}")
+    return {"id": instance, "config": cfg}
+
+
+def dod_params(instance: int, value: int) -> dict[str, Any]:
+    return {"id": instance, "value": int(value)}
+
+
+def led_params(instance: int, on: bool) -> dict[str, Any]:
+    # Led.Ctrl: 1 = on, 0 = off
+    return {"id": instance, "state": 1 if on else 0}
+
+
+def ble_adv_params(instance: int, advertising: bool) -> dict[str, Any]:
+    # Ble.Adv: INVERTED per API doc -> 0 = enable, 1 = disable
+    return {"id": instance, "enable": 0 if advertising else 1}
+
+
+# ---------------------------------------------------------------------------
+# Tolerant parser (the API doc contains "ture", missing commas, full-width colons)
+# ---------------------------------------------------------------------------
+
+_FIXES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bture\b"), "true"),
+    (re.compile(r"\bflase\b"), "false"),
+    (re.compile("："), ":"),          # full-width colon
+    (re.compile("，"), ","),          # full-width comma
+    # missing comma between a value and the next key:  "a": 1 \n "b"
+    (re.compile(r'("|\d|true|false|null|\}|\])(\s*\n\s*)(")'), r"\1,\2\3"),
+    # trailing comma before } or ]
+    (re.compile(r",(\s*[}\]])"), r"\1"),
+)
+
+
+class ParseError(Exception):
+    pass
+
+
+def parse_datagram(data: bytes) -> tuple[dict[str, Any], bool]:
+    """Return (message, repaired). Raises ParseError if not recoverable."""
+    text = data.decode("utf-8", errors="replace").strip().strip("\x00")
+    try:
+        msg = json.loads(text)
+        repaired = False
+    except json.JSONDecodeError:
+        fixed = text
+        for pattern, repl in _FIXES:
+            fixed = pattern.sub(repl, fixed)
+        try:
+            msg = json.loads(fixed)
+        except json.JSONDecodeError as err:
+            raise ParseError(f"{err} in {text!r}") from err
+        repaired = True
+    if not isinstance(msg, dict):
+        raise ParseError(f"JSON is not an object: {text!r}")
+    return msg, repaired
+
+
+def _to_number(value: Any) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        num = float(str(value).strip())
+        return int(num) if num.is_integer() else num
+    except ValueError:
+        return value
+
+
+def normalize(query: Query, result: dict[str, Any]) -> dict[str, Any]:
+    """Make sure every known field exists (null if missing) and numbers are numbers.
+
+    Unknown extra fields are kept, so nothing the device sends gets lost.
+    """
+    out = dict(result)
+    for f in query.fields:
+        val = result.get(f.key)
+        if f.component == "binary_sensor":
+            if val is None:
+                out[f.key] = None
+            else:
+                out[f.key] = bool(_to_number(val))
+        elif f.numeric:
+            out[f.key] = _to_number(val)
+        else:
+            out[f.key] = None if val is None else str(val)
+    return out
