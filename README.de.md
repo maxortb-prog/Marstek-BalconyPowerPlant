@@ -4,7 +4,7 @@
 
 Home-Assistant-Add-on, das einen **Marstek-Venus**-Speicher (Venus A/C/D/E) über die
 lokale **Marstek Open API Rev 2.0** (UDP) und **MQTT-Discovery** mit Home Assistant
-verbindet. Alles erscheint unter dem Gerät **BalconyPowerPlant**.
+verbindet. Alles erscheint im Bereich **BalconyPowerPlant**: ein Hauptgerät plus ein Unter-Gerät je Abfrage.
 
 ## Funktionen
 

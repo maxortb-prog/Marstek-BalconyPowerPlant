@@ -1,5 +1,5 @@
 name: BalconyPowerPlant
-version: "0.1.0"
+version: "0.2.0"
 slug: balcony_power_plant
 description: >-
   Local UDP bridge between a Marstek Venus battery (Open API Rev 2.0)
@@ -30,7 +30,7 @@ options:
   mqtt_password: "mqtt-marstek"
   mqtt_discovery_prefix: "homeassistant"
   mqtt_base_topic: "Marstek-Bridge-Control"
-  mqtt_suggested_area: "Marstek"
+  mqtt_suggested_area: "BalconyPowerPlant"
   # --- Communication (also changeable at runtime in HA) ---
   queue_enabled: true
   request_delay: 2

@@ -34,7 +34,8 @@ class Field:
 class Query:
     key: str                      # internal key, also option name query_<key>
     method: str                   # Open API method
-    label: str                    # human readable (English)
+    label: str                    # human readable (English), used in logs
+    device: str                   # name of the HA sub-device ("BalconyPowerPlant <device>")
     fields: tuple[Field, ...] = field(default_factory=tuple)
 
 
@@ -55,42 +56,42 @@ def _pv_fields() -> tuple[Field, ...]:
 
 
 QUERIES: dict[str, Query] = {
-    "device": Query("device", "Marstek.GetDevice", "Device info", (
-        Field("device", "Device model", diagnostic=True, numeric=False, icon="mdi:battery-charging-high"),
-        Field("ver", "Firmware version", diagnostic=True, numeric=False, icon="mdi:chip"),
+    "device": Query("device", "Marstek.GetDevice", "Device info", "Device info", (
+        Field("device", "Model", diagnostic=True, numeric=False, icon="mdi:battery-charging-high"),
+        Field("ver", "Firmware", diagnostic=True, numeric=False, icon="mdi:chip"),
         Field("ble_mac", "Bluetooth MAC", diagnostic=True, numeric=False, icon="mdi:bluetooth"),
         Field("wifi_mac", "WiFi MAC", diagnostic=True, numeric=False, icon="mdi:wifi"),
         Field("wifi_name", "WiFi name", diagnostic=True, numeric=False, icon="mdi:wifi"),
         Field("ip", "IP address", diagnostic=True, numeric=False, icon="mdi:ip-network"),
     )),
-    "wifi": Query("wifi", "Wifi.GetStatus", "WiFi status", (
-        Field("ssid", "WiFi SSID", diagnostic=True, numeric=False, icon="mdi:wifi"),
-        Field("rssi", "WiFi signal", unit="dBm", device_class="signal_strength",
+    "wifi": Query("wifi", "Wifi.GetStatus", "WiFi status", "WiFi", (
+        Field("ssid", "SSID", diagnostic=True, numeric=False, icon="mdi:wifi"),
+        Field("rssi", "Signal", unit="dBm", device_class="signal_strength",
               state_class="measurement", diagnostic=True),
-        Field("sta_ip", "WiFi IP", diagnostic=True, numeric=False, icon="mdi:ip-network"),
-        Field("sta_gate", "WiFi gateway", diagnostic=True, numeric=False, icon="mdi:router-network"),
-        Field("sta_mask", "WiFi subnet mask", diagnostic=True, numeric=False, icon="mdi:ip-network"),
-        Field("sta_dns", "WiFi DNS", diagnostic=True, numeric=False, icon="mdi:dns"),
+        Field("sta_ip", "IP address", diagnostic=True, numeric=False, icon="mdi:ip-network"),
+        Field("sta_gate", "Gateway", diagnostic=True, numeric=False, icon="mdi:router-network"),
+        Field("sta_mask", "Subnet mask", diagnostic=True, numeric=False, icon="mdi:ip-network"),
+        Field("sta_dns", "DNS", diagnostic=True, numeric=False, icon="mdi:dns"),
     )),
-    "ble": Query("ble", "BLE.GetStatus", "Bluetooth status", (
-        Field("state", "Bluetooth state", diagnostic=True, numeric=False, icon="mdi:bluetooth-connect"),
-        Field("ble_mac", "Bluetooth status MAC", diagnostic=True, numeric=False, icon="mdi:bluetooth"),
+    "ble": Query("ble", "BLE.GetStatus", "Bluetooth status", "Bluetooth", (
+        Field("state", "State", diagnostic=True, numeric=False, icon="mdi:bluetooth-connect"),
+        Field("ble_mac", "MAC", diagnostic=True, numeric=False, icon="mdi:bluetooth"),
     )),
-    "battery": Query("battery", "Bat.GetStatus", "Battery status", (
-        Field("soc", "Battery SOC", unit="%", device_class="battery", state_class="measurement"),
-        Field("bat_temp", "Battery temperature", unit="°C", device_class="temperature",
+    "battery": Query("battery", "Bat.GetStatus", "Battery status", "Battery", (
+        Field("soc", "SOC", unit="%", device_class="battery", state_class="measurement"),
+        Field("bat_temp", "Temperature", unit="°C", device_class="temperature",
               state_class="measurement"),
-        Field("bat_capacity", "Battery remaining capacity", unit="Wh",
+        Field("bat_capacity", "Remaining capacity", unit="Wh",
               device_class="energy_storage", state_class="measurement"),
-        Field("rated_capacity", "Battery rated capacity", unit="Wh",
+        Field("rated_capacity", "Rated capacity", unit="Wh",
               device_class="energy_storage", diagnostic=True),
         Field("charg_flag", "Charging allowed", component="binary_sensor", diagnostic=True),
         Field("dischrg_flag", "Discharging allowed", component="binary_sensor", diagnostic=True),
     )),
-    "pv": Query("pv", "PV.GetStatus", "PV status", _pv_fields()),
-    "es_status": Query("es_status", "ES.GetStatus", "Energy system status", (
-        Field("bat_soc", "System SOC", unit="%", device_class="battery", state_class="measurement"),
-        Field("bat_cap", "System battery capacity", unit="Wh", device_class="energy_storage",
+    "pv": Query("pv", "PV.GetStatus", "PV status", "PV", _pv_fields()),
+    "es_status": Query("es_status", "ES.GetStatus", "Energy system status", "Energy system", (
+        Field("bat_soc", "SOC", unit="%", device_class="battery", state_class="measurement"),
+        Field("bat_cap", "Battery capacity", unit="Wh", device_class="energy_storage",
               diagnostic=True),
         Field("pv_power", "PV power", unit="W", device_class="power", state_class="measurement"),
         Field("ongrid_power", "Grid power", unit="W", device_class="power", state_class="measurement"),
@@ -106,8 +107,8 @@ QUERIES: dict[str, Query] = {
         Field("total_load_energy", "Total load energy", unit="Wh", device_class="energy",
               state_class="total_increasing"),
     )),
-    "es_mode": Query("es_mode", "ES.GetMode", "Energy system mode", (
-        Field("mode", "Device operating mode", numeric=False, icon="mdi:cog-transfer"),
+    "es_mode": Query("es_mode", "ES.GetMode", "Energy system mode", "Mode", (
+        Field("mode", "Operating mode", numeric=False, icon="mdi:cog-transfer"),
         Field("ct_state", "CT connected", component="binary_sensor", diagnostic=True),
     )),
 }

@@ -79,30 +79,44 @@ In both modes **late answers** (after the timeout) are still processed, and
 invalid JSON from the device (e.g. `ture`) is repaired and logged as WARNING.
 
 Communication settings changed in HA are **pending** until you press
-**Apply communication settings**. The sensor *Active communication settings*
+**Apply settings** (device *Communication*). The sensor *Active settings*
 shows what is really active.
 
-## Entities (device "BalconyPowerPlant")
+## Devices and entities
 
-| Type | Entities |
-|---|---|
-| Status | Communication established (INIT/ON/FAIL), statistics (requests, answers, timeouts, retries, late, duplicates, errors, repaired, queue length, pending, round-trip time, last response), active communication settings |
-| Device info | model, firmware, BLE/WiFi MAC, WiFi name, IP |
-| WiFi | SSID, signal, IP, gateway, mask, DNS |
-| Bluetooth | state, MAC |
-| Battery | SOC, **temperature**, remaining/rated capacity, charging/discharging allowed |
-| PV | PV1–PV4 power, voltage, current, working |
-| Energy system | system SOC, battery capacity, PV/grid/off-grid/battery power, energy counters |
-| Mode | device operating mode, CT connected |
-| Control | Operating mode (select), Passive power, Passive countdown, **Apply mode** |
-| Settings | Depth of discharge, LED, Bluetooth advertising |
-| Communication | Request queue, delay, timeout, retries, **Apply communication settings** |
-| General | Log level, Reinitialize, Request all, per query: *Enable …* / *Request …* |
+All devices are placed in the area `mqtt_suggested_area` (default **BalconyPowerPlant**).
+Every query has its own sub-device, linked to the main device ("Connected devices").
+
+```
+Area BalconyPowerPlant
+└─ BalconyPowerPlant                  Communication established, Reinitialize, Request all, Log level
+   ├─ BalconyPowerPlant Control        Operating mode, Passive power, Passive countdown, Apply mode
+   ├─ BalconyPowerPlant Settings       Depth of discharge, LED, Bluetooth advertising
+   ├─ BalconyPowerPlant Communication  Request queue/delay/timeout/retries, Apply settings, Active settings, statistics
+   ├─ BalconyPowerPlant Device info    Model, Firmware, Bluetooth MAC, WiFi MAC, WiFi name, IP address   (Marstek.GetDevice)
+   ├─ BalconyPowerPlant WiFi           SSID, Signal, IP address, Gateway, Subnet mask, DNS                (Wifi.GetStatus)
+   ├─ BalconyPowerPlant Bluetooth      State, MAC                                                         (BLE.GetStatus)
+   ├─ BalconyPowerPlant Battery        SOC, Temperature, Remaining/Rated capacity, Charging/Discharging allowed (Bat.GetStatus)
+   ├─ BalconyPowerPlant PV             PV1–PV4 power, voltage, current, working                           (PV.GetStatus)
+   ├─ BalconyPowerPlant Energy system  SOC, Battery capacity, PV/Grid/Off-grid/Battery power, energy counters (ES.GetStatus)
+   └─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
+```
+
+Every query device additionally contains **Enable query** (switch) and **Request** (button).
+
+**When are entities created?**
+- Main device, Control, Settings and Communication: at start (so you can see INIT / FAIL).
+- Query devices: only after a **successful initialization**, their sensors after the
+  **first answer** of that query.
+- Query disabled: only *Enable query* remains in its device.
+
+Entity ids follow the pattern `<domain>.balconypowerplant_<device>_<name>`, e.g.
+`sensor.balconypowerplant_battery_temperature`, `button.balconypowerplant_battery_request`.
 
 ## Polling from Home Assistant
 
-In this version the bridge does not poll by itself. Press the *Request …*
-buttons from an automation, e.g. every 10 s:
+In this version the bridge does not poll by itself. Press the *Request*
+buttons of the query devices from an automation, e.g. every 10 s:
 
 ```yaml
 alias: BalconyPowerPlant polling
@@ -113,8 +127,8 @@ actions:
   - action: button.press
     target:
       entity_id:
-        - button.balconypowerplant_request_energy_system_status
-        - button.balconypowerplant_request_battery_status
+        - button.balconypowerplant_energy_system_request
+        - button.balconypowerplant_battery_request
 ```
 
 Passive control (repeat before the countdown expires):
@@ -122,13 +136,13 @@ Passive control (repeat before the countdown expires):
 ```yaml
 actions:
   - action: select.select_option
-    target: { entity_id: select.balconypowerplant_operating_mode }
+    target: { entity_id: select.balconypowerplant_control_operating_mode }
     data: { option: Passive }
   - action: number.set_value
-    target: { entity_id: number.balconypowerplant_passive_power }
+    target: { entity_id: number.balconypowerplant_control_passive_power }
     data: { value: 300 }
   - action: button.press
-    target: { entity_id: button.balconypowerplant_apply_mode }
+    target: { entity_id: button.balconypowerplant_control_apply_mode }
 ```
 
 Check the real entity ids in HA – they depend on your language/installation.

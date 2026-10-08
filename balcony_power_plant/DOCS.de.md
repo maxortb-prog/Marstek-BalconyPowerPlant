@@ -78,32 +78,45 @@ In beiden Modi werden **verspätete Antworten** (nach dem Timeout) trotzdem
 verarbeitet. Ungültiges JSON vom Gerät (z. B. `ture`) wird repariert und als WARNING geloggt.
 
 Im HA geänderte Kommunikationseinstellungen sind **vorgemerkt**, bis du
-**Apply communication settings** drückst. Der Sensor *Active communication settings*
+**Apply settings** (device *Communication*) drückst. Der Sensor *Active settings*
 zeigt, was tatsächlich aktiv ist.
 
-## Entities (Gerät „BalconyPowerPlant“)
+## Geräte und Entities
 
-| Typ | Entities |
-|---|---|
-| Status | Communication established (INIT/ON/FAIL), Statistik (Anfragen, Antworten, Timeouts, Retries, verspätet, doppelt, Fehler, repariert, Queue-Länge, offen, Antwortzeit, letzte Antwort), aktive Kommunikationseinstellungen |
-| Geräteinfo | Modell, Firmware, BLE-/WLAN-MAC, WLAN-Name, IP |
-| WLAN | SSID, Signal, IP, Gateway, Maske, DNS |
-| Bluetooth | Status, MAC |
-| Batterie | SOC, **Temperatur**, Rest-/Nennkapazität, Laden/Entladen erlaubt |
-| PV | PV1–PV4 Leistung, Spannung, Strom, aktiv |
-| Energiesystem | System-SOC, Batteriekapazität, PV-/Netz-/Off-Grid-/Batterieleistung, Energiezähler |
-| Modus | Betriebsmodus des Geräts, CT verbunden |
-| Steuerung | Operating mode (Select), Passive power, Passive countdown, **Apply mode** |
-| Einstellungen | Depth of discharge, LED, Bluetooth advertising |
-| Kommunikation | Request queue, Delay, Timeout, Retries, **Apply communication settings** |
-| Allgemein | Log level, Reinitialize, Request all, je Abfrage: *Enable …* / *Request …* |
+Alle Geräte liegen im Bereich `mqtt_suggested_area` (Standard **BalconyPowerPlant**).
+Jede Abfrage hat ein eigenes Unter-Gerät, verknüpft mit dem Hauptgerät („Verbundene Geräte“).
 
+```
+Area BalconyPowerPlant
+└─ BalconyPowerPlant                  Communication established, Reinitialize, Request all, Log level
+   ├─ BalconyPowerPlant Control        Operating mode, Passive power, Passive countdown, Apply mode
+   ├─ BalconyPowerPlant Settings       Depth of discharge, LED, Bluetooth advertising
+   ├─ BalconyPowerPlant Communication  Request queue/delay/timeout/retries, Apply settings, Active settings, statistics
+   ├─ BalconyPowerPlant Device info    Model, Firmware, Bluetooth MAC, WiFi MAC, WiFi name, IP address   (Marstek.GetDevice)
+   ├─ BalconyPowerPlant WiFi           SSID, Signal, IP address, Gateway, Subnet mask, DNS                (Wifi.GetStatus)
+   ├─ BalconyPowerPlant Bluetooth      State, MAC                                                         (BLE.GetStatus)
+   ├─ BalconyPowerPlant Battery        SOC, Temperature, Remaining/Rated capacity, Charging/Discharging allowed (Bat.GetStatus)
+   ├─ BalconyPowerPlant PV             PV1–PV4 power, voltage, current, working                           (PV.GetStatus)
+   ├─ BalconyPowerPlant Energy system  SOC, Battery capacity, PV/Grid/Off-grid/Battery power, energy counters (ES.GetStatus)
+   └─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
+```
+
+Jedes Abfrage-Gerät enthält zusätzlich **Enable query** (Schalter) und **Request** (Button).
 Die Entity-Namen sind englisch (festgelegt).
+
+**Wann werden Entities angelegt?**
+- Hauptgerät, Control, Settings und Communication: beim Start (damit INIT / FAIL sichtbar ist).
+- Abfrage-Geräte: erst nach **erfolgreicher Initialisierung**, ihre Sensoren erst nach der
+  **ersten Antwort** dieser Abfrage.
+- Abfrage deaktiviert: im Gerät bleibt nur *Enable query*.
+
+Entity-IDs folgen dem Muster `<domain>.balconypowerplant_<gerät>_<name>`, z. B.
+`sensor.balconypowerplant_battery_temperature`, `button.balconypowerplant_battery_request`.
 
 ## Abfragen aus Home Assistant
 
 In dieser Version fragt die Bridge nicht selbst zyklisch ab. Löse die
-*Request …*-Buttons per Automation aus, z. B. alle 10 s:
+*Request*-Buttons der Abfrage-Geräte per Automation aus, z. B. alle 10 s:
 
 ```yaml
 alias: BalconyPowerPlant Polling
@@ -114,8 +127,8 @@ actions:
   - action: button.press
     target:
       entity_id:
-        - button.balconypowerplant_request_energy_system_status
-        - button.balconypowerplant_request_battery_status
+        - button.balconypowerplant_energy_system_request
+        - button.balconypowerplant_battery_request
 ```
 
 Passive-Steuerung (rechtzeitig vor Ablauf der Nachlaufzeit wiederholen):
@@ -123,13 +136,13 @@ Passive-Steuerung (rechtzeitig vor Ablauf der Nachlaufzeit wiederholen):
 ```yaml
 actions:
   - action: select.select_option
-    target: { entity_id: select.balconypowerplant_operating_mode }
+    target: { entity_id: select.balconypowerplant_control_operating_mode }
     data: { option: Passive }
   - action: number.set_value
-    target: { entity_id: number.balconypowerplant_passive_power }
+    target: { entity_id: number.balconypowerplant_control_passive_power }
     data: { value: 300 }
   - action: button.press
-    target: { entity_id: button.balconypowerplant_apply_mode }
+    target: { entity_id: button.balconypowerplant_control_apply_mode }
 ```
 
 Die tatsächlichen Entity-IDs bitte im HA prüfen.

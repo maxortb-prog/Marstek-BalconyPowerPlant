@@ -4,7 +4,7 @@
 
 Home Assistant add-on that connects a **Marstek Venus** battery (Venus A/C/D/E)
 to Home Assistant via the local **Marstek Open API Rev 2.0** (UDP) and **MQTT
-discovery**. Everything appears under the device **BalconyPowerPlant**.
+discovery**. Everything appears in the area **BalconyPowerPlant**: one main device plus one sub-device per query.
 
 ## Features
 

@@ -40,7 +40,7 @@ DEFAULTS: dict[str, Any] = {
     "mqtt_password": "",
     "mqtt_discovery_prefix": "homeassistant",
     "mqtt_base_topic": "Marstek-Bridge-Control",
-    "mqtt_suggested_area": "Marstek",
+    "mqtt_suggested_area": "BalconyPowerPlant",
     "queue_enabled": True,
     "request_delay": 2.0,
     "request_timeout": 5.0,

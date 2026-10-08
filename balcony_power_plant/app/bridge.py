@@ -73,6 +73,7 @@ class Bridge:
         self.mode_select: str | None = None       # mode chosen in HA (select)
         self.comm_pending = self._comm_from_options()
         self._stats_dirty = True
+        self._has_data: set[str] = set()   # queries that answered at least once
         self._init_task: asyncio.Task | None = None
         self._bg: set[asyncio.Task] = set()
         self.udp = UdpClient(
@@ -142,35 +143,56 @@ class Bridge:
             _LOG.warning("MQTT discovery publish failed: %s", err)
 
     # ============================================================== discovery
-    def _device_block(self) -> dict[str, Any]:
+    # Device structure (v0.2.0) / Gerätestruktur:
+    #   BalconyPowerPlant                 main device (status, general)
+    #   ├─ BalconyPowerPlant Control       operating mode / passive control
+    #   ├─ BalconyPowerPlant Settings      DOD, LED, Bluetooth advertising
+    #   ├─ BalconyPowerPlant Communication queue settings + statistics
+    #   └─ BalconyPowerPlant <query>       one sub-device per Open API query
+    # Query devices are published only after a successful initialization,
+    # their sensors after the first answer of that query.
+    # Abfrage-Geräte erst nach erfolgreicher Initialisierung, ihre Sensoren
+    # erst nach der ersten Antwort dieser Abfrage.
+
+    def _device_block(self, group: str | None = None, label: str | None = None,
+                      method: str | None = None) -> dict[str, Any]:
         model = self.opts.get("device_type") or self.device_info.get("device") or "Marstek Venus"
-        block: dict[str, Any] = {
-            "ids": [NODE_ID],
-            "name": DEVICE_NAME,
-            "mf": "Marstek",
-            "mdl": model,
-        }
-        if self.device_info.get("ver") is not None:
-            block["sw"] = str(self.device_info["ver"])
+        block: dict[str, Any] = {"mf": "Marstek"}
+        if group is None:
+            block.update({"ids": [NODE_ID], "name": DEVICE_NAME, "mdl": model})
+            if self.device_info.get("ver") is not None:
+                block["sw"] = str(self.device_info["ver"])
+        else:
+            block.update({
+                "ids": [f"{NODE_ID}_{group}"],
+                "name": f"{DEVICE_NAME} {label}",
+                "mdl": f"{model} · {method}" if method else model,
+                "via_device": NODE_ID,
+            })
         if self.opts.get("mqtt_suggested_area"):
             block["sa"] = self.opts["mqtt_suggested_area"]
         return block
 
-    def _base_cfg(self, key: str, name: str) -> dict[str, Any]:
+    def _base_cfg(self, key: str, name: str, dev: dict[str, Any]) -> dict[str, Any]:
         return {
             "name": name,
             "uniq_id": f"bpp_{key}",
             "avty_t": self.t_avail,
-            "dev": self._device_block(),
+            "dev": dev,
             "o": {"name": DEVICE_NAME, "sw": VERSION,
                   "url": "https://github.com/maxortb-prog/Marstek-BalconyPowerPlant"},
         }
 
-    def _query_entities(self, q: Query) -> list[tuple[str, str, dict]]:
+    # ---------------------------------------------------------- query devices
+    def _query_device(self, q: Query) -> dict[str, Any]:
+        return self._device_block(q.key, q.device, q.method)
+
+    def _query_sensor_entities(self, q: Query) -> list[tuple[str, str, dict]]:
+        dev = self._query_device(q)
         out: list[tuple[str, str, dict]] = []
         for f in q.fields:
             key = f"{q.key}_{f.key}"
-            cfg = self._base_cfg(key, f.name)
+            cfg = self._base_cfg(key, f.name, dev)
             cfg["stat_t"] = self.t_state(q.key)
             if f.component == "binary_sensor":
                 cfg["val_tpl"] = (
@@ -190,37 +212,121 @@ class Bridge:
             if f.icon:
                 cfg["ic"] = f.icon
             out.append((f.component, key, cfg))
-        btn = self._base_cfg(f"request_{q.key}", f"Request {q.label}")
-        btn.update({"cmd_t": self.t_cmd(f"request/{q.key}"), "pl_prs": "PRESS",
-                    "ic": "mdi:refresh"})
-        out.append(("button", f"request_{q.key}", btn))
         return out
 
+    def _query_request_button(self, q: Query) -> tuple[str, str, dict]:
+        cfg = self._base_cfg(f"request_{q.key}", "Request", self._query_device(q))
+        cfg.update({"cmd_t": self.t_cmd(f"request/{q.key}"), "pl_prs": "PRESS",
+                    "ic": "mdi:refresh"})
+        return ("button", f"request_{q.key}", cfg)
+
+    def _query_enable_switch(self, q: Query) -> tuple[str, str, dict]:
+        cfg = self._base_cfg(f"query_{q.key}", "Enable query", self._query_device(q))
+        cfg.update({"cmd_t": self.t_cmd(f"enable/{q.key}"),
+                    "stat_t": self.t_ctrl(f"query_{q.key}"),
+                    "ent_cat": "config", "ic": "mdi:toggle-switch"})
+        return ("switch", f"query_{q.key}", cfg)
+
+    async def publish_query_discovery(self, q: Query) -> int:
+        """Publish/remove the entities of one query device according to its state."""
+        if not self.initialized:
+            return 0
+        enabled = self.query_enabled(q.key)
+        count = 0
+        for component, key, cfg in [self._query_enable_switch(q)]:
+            await self._publish_discovery(component, key, cfg)
+            count += 1
+        component, key, cfg = self._query_request_button(q)
+        await self._publish_discovery(component, key, cfg if enabled else None)
+        count += 1 if enabled else 0
+        show_sensors = enabled and q.key in self._has_data
+        for component, key, cfg in self._query_sensor_entities(q):
+            await self._publish_discovery(component, key, cfg if show_sensors else None)
+            count += 1 if show_sensors else 0
+        return count
+
+    # ------------------------------------------------------- fixed devices
     def _control_entities(self) -> list[tuple[str, str, dict]]:
         ents: list[tuple[str, str, dict]] = []
         mp = self.opts.max_power
+        main = self._device_block()
+        control = self._device_block("control", "Control", "ES.SetMode")
+        settings = self._device_block("settings", "Settings", "DOD.SET / Led.Ctrl / Ble.Adv")
+        comm = self._device_block("communication", "Communication", "UDP")
 
-        def add(component: str, key: str, name: str, **extra: Any) -> None:
-            cfg = self._base_cfg(key, name)
+        def add(dev: dict, component: str, key: str, name: str, **extra: Any) -> None:
+            cfg = self._base_cfg(key, name, dev)
             cfg.update(extra)
             ents.append((component, key, cfg))
 
-        # --- status ---------------------------------------------------------
-        add("sensor", "communication", "Communication established",
+        # --- main device ----------------------------------------------------
+        add(main, "sensor", "communication", "Communication established",
             stat_t=self.t_state("communication"), dev_cla="enum",
             ops=[COMM_INIT, COMM_ON, COMM_FAIL], ic="mdi:lan-connect")
+        add(main, "button", "reinitialize", "Reinitialize",
+            cmd_t=self.t_cmd("reinitialize"), pl_prs="PRESS", ent_cat="config",
+            ic="mdi:restart")
+        add(main, "button", "request_all", "Request all",
+            cmd_t=self.t_cmd("request_all"), pl_prs="PRESS", ic="mdi:refresh-circle")
+        add(main, "select", "log_level", "Log level",
+            cmd_t=self.t_cmd("log_level"), stat_t=self.t_ctrl("log_level"),
+            ops=LOG_LEVELS, ent_cat="config", ic="mdi:math-log")
+
+        # --- control --------------------------------------------------------
+        add(control, "select", "mode_select", "Operating mode",
+            cmd_t=self.t_cmd("mode_select"), stat_t=self.t_ctrl("mode_select"),
+            ops=list(MODES), ic="mdi:cog-transfer")
+        add(control, "number", "passive_power", "Passive power",
+            cmd_t=self.t_cmd("passive_power"), stat_t=self.t_ctrl("passive_power"),
+            min=-mp, max=mp, step=10, unit_of_meas="W", dev_cla="power",
+            mode="slider", ic="mdi:transmission-tower-export")
+        add(control, "number", "passive_cd_time", "Passive countdown",
+            cmd_t=self.t_cmd("passive_cd_time"), stat_t=self.t_ctrl("passive_cd_time"),
+            min=0, max=86400, step=1, unit_of_meas="s", mode="box", ic="mdi:timer")
+        add(control, "button", "apply_mode", "Apply mode",
+            cmd_t=self.t_cmd("apply_mode"), pl_prs="PRESS", ic="mdi:send")
+
+        # --- settings (no getter in the API -> last confirmed value) --------
+        add(settings, "number", "dod", "Depth of discharge",
+            cmd_t=self.t_cmd("dod"), stat_t=self.t_ctrl("dod"),
+            min=30, max=88, step=1, unit_of_meas="%", mode="slider",
+            ic="mdi:battery-arrow-down")
+        add(settings, "switch", "led", "LED",
+            cmd_t=self.t_cmd("led"), stat_t=self.t_ctrl("led"), ic="mdi:led-on")
+        add(settings, "switch", "ble_adv", "Bluetooth advertising",
+            cmd_t=self.t_cmd("ble_adv"), stat_t=self.t_ctrl("ble_adv"),
+            ic="mdi:bluetooth-settings")
+
+        # --- communication (pending until "Apply settings") ----------------
+        add(comm, "switch", "queue_enabled", "Request queue",
+            cmd_t=self.t_cmd("queue_enabled"), stat_t=self.t_ctrl("queue_enabled"),
+            ent_cat="config", ic="mdi:tray-full")
+        add(comm, "number", "request_delay", "Request delay",
+            cmd_t=self.t_cmd("request_delay"), stat_t=self.t_ctrl("request_delay"),
+            min=0, max=60, step=0.5, unit_of_meas="s", mode="box", ent_cat="config")
+        add(comm, "number", "request_timeout", "Request timeout",
+            cmd_t=self.t_cmd("request_timeout"), stat_t=self.t_ctrl("request_timeout"),
+            min=1, max=120, step=0.5, unit_of_meas="s", mode="box", ent_cat="config")
+        add(comm, "number", "request_retries", "Request retries",
+            cmd_t=self.t_cmd("request_retries"), stat_t=self.t_ctrl("request_retries"),
+            min=0, max=20, step=1, mode="box", ent_cat="config")
+        add(comm, "button", "apply_comm", "Apply settings",
+            cmd_t=self.t_cmd("apply_comm"), pl_prs="PRESS", ent_cat="config",
+            ic="mdi:content-save-cog")
+        add(comm, "sensor", "comm_active", "Active settings",
+            stat_t=self.t_state("comm_active"), ic="mdi:cog")
         stats = [
             ("sent", "Requests sent", None, "mdi:upload"),
             ("responses", "Responses received", None, "mdi:download"),
-            ("timeouts", "Request timeouts", None, "mdi:timer-alert"),
-            ("retries", "Request retries", None, "mdi:repeat"),
+            ("timeouts", "Timeouts", None, "mdi:timer-alert"),
+            ("retries", "Retries", None, "mdi:repeat"),
             ("late", "Late responses", None, "mdi:clock-alert"),
             ("duplicates", "Duplicate responses", None, "mdi:content-duplicate"),
             ("errors", "Device errors", None, "mdi:alert-circle"),
             ("parse_repairs", "Repaired responses", None, "mdi:wrench"),
             ("queue_length", "Queue length", None, "mdi:tray-full"),
             ("pending", "Pending requests", None, "mdi:timer-sand"),
-            ("last_rtt_ms", "Last round-trip time", "ms", "mdi:timer-outline"),
+            ("last_rtt_ms", "Round-trip time", "ms", "mdi:timer-outline"),
         ]
         for key, name, unit, icon in stats:
             extra: dict[str, Any] = {
@@ -230,69 +336,10 @@ class Bridge:
             }
             if unit:
                 extra["unit_of_meas"] = unit
-            add("sensor", f"stats_{key}", name, **extra)
-        add("sensor", "stats_last_response", "Last response",
+            add(comm, "sensor", f"stats_{key}", name, **extra)
+        add(comm, "sensor", "stats_last_response", "Last response",
             stat_t=self.t_state("stats"), val_tpl="{{ value_json.last_response }}",
             dev_cla="timestamp", ent_cat="diagnostic")
-        add("sensor", "comm_active", "Active communication settings",
-            stat_t=self.t_state("comm_active"), ent_cat="diagnostic", ic="mdi:cog")
-
-        # --- operating mode -------------------------------------------------
-        add("select", "mode_select", "Operating mode",
-            cmd_t=self.t_cmd("mode_select"), stat_t=self.t_ctrl("mode_select"),
-            ops=list(MODES), ic="mdi:cog-transfer")
-        add("number", "passive_power", "Passive power",
-            cmd_t=self.t_cmd("passive_power"), stat_t=self.t_ctrl("passive_power"),
-            min=-mp, max=mp, step=10, unit_of_meas="W", dev_cla="power",
-            mode="slider", ic="mdi:transmission-tower-export")
-        add("number", "passive_cd_time", "Passive countdown",
-            cmd_t=self.t_cmd("passive_cd_time"), stat_t=self.t_ctrl("passive_cd_time"),
-            min=0, max=86400, step=1, unit_of_meas="s", mode="box", ic="mdi:timer")
-        add("button", "apply_mode", "Apply mode",
-            cmd_t=self.t_cmd("apply_mode"), pl_prs="PRESS", ic="mdi:send")
-
-        # --- device settings (no getter in the API -> last confirmed value) -
-        add("number", "dod", "Depth of discharge",
-            cmd_t=self.t_cmd("dod"), stat_t=self.t_ctrl("dod"),
-            min=30, max=88, step=1, unit_of_meas="%", mode="slider",
-            ent_cat="config", ic="mdi:battery-arrow-down")
-        add("switch", "led", "LED",
-            cmd_t=self.t_cmd("led"), stat_t=self.t_ctrl("led"),
-            ent_cat="config", ic="mdi:led-on")
-        add("switch", "ble_adv", "Bluetooth advertising",
-            cmd_t=self.t_cmd("ble_adv"), stat_t=self.t_ctrl("ble_adv"),
-            ent_cat="config", ic="mdi:bluetooth-settings")
-
-        # --- communication (pending until "Apply communication settings") --
-        add("switch", "queue_enabled", "Request queue",
-            cmd_t=self.t_cmd("queue_enabled"), stat_t=self.t_ctrl("queue_enabled"),
-            ent_cat="config", ic="mdi:tray-full")
-        add("number", "request_delay", "Request delay",
-            cmd_t=self.t_cmd("request_delay"), stat_t=self.t_ctrl("request_delay"),
-            min=0, max=60, step=0.5, unit_of_meas="s", mode="box", ent_cat="config")
-        add("number", "request_timeout", "Request timeout",
-            cmd_t=self.t_cmd("request_timeout"), stat_t=self.t_ctrl("request_timeout"),
-            min=1, max=120, step=0.5, unit_of_meas="s", mode="box", ent_cat="config")
-        add("number", "request_retries", "Request retries",
-            cmd_t=self.t_cmd("request_retries"), stat_t=self.t_ctrl("request_retries"),
-            min=0, max=20, step=1, mode="box", ent_cat="config")
-        add("button", "apply_comm", "Apply communication settings",
-            cmd_t=self.t_cmd("apply_comm"), pl_prs="PRESS", ent_cat="config",
-            ic="mdi:content-save-cog")
-
-        # --- general --------------------------------------------------------
-        add("select", "log_level", "Log level",
-            cmd_t=self.t_cmd("log_level"), stat_t=self.t_ctrl("log_level"),
-            ops=LOG_LEVELS, ent_cat="config", ic="mdi:math-log")
-        add("button", "reinitialize", "Reinitialize",
-            cmd_t=self.t_cmd("reinitialize"), pl_prs="PRESS", ent_cat="config",
-            ic="mdi:restart")
-        add("button", "request_all", "Request all",
-            cmd_t=self.t_cmd("request_all"), pl_prs="PRESS", ic="mdi:refresh-circle")
-        for q in QUERIES.values():
-            add("switch", f"query_{q.key}", f"Enable {q.label}",
-                cmd_t=self.t_cmd(f"enable/{q.key}"), stat_t=self.t_ctrl(f"query_{q.key}"),
-                ent_cat="config", ic="mdi:toggle-switch")
         return ents
 
     async def publish_all_discovery(self) -> None:
@@ -302,14 +349,8 @@ class Bridge:
             count += 1
         for q in QUERIES.values():
             count += await self.publish_query_discovery(q)
-        _LOG.info("MQTT discovery published (%d entities) for device %s", count, DEVICE_NAME)
-
-    async def publish_query_discovery(self, q: Query) -> int:
-        enabled = self.query_enabled(q.key)
-        ents = self._query_entities(q)
-        for component, key, cfg in ents:
-            await self._publish_discovery(component, key, cfg if enabled else None)
-        return len(ents) if enabled else 0
+        _LOG.info("MQTT discovery published (%d entities)%s", count,
+                  "" if self.initialized else " - query devices follow after initialization")
 
     # ================================================================ states
     async def publish_initial_states(self) -> None:
@@ -396,6 +437,9 @@ class Bridge:
 
         self.initialized = True
         await self.set_comm(COMM_ON)
+        for qq in QUERIES.values():
+            await self.publish_query_discovery(qq)
+        _LOG.info("Query devices published to Home Assistant")
         _LOG.info("Initialization done, sending device settings and initial queries")
         self.send_dod(int(self.opts["dod"]))
         self.send_led(bool(self.opts["led"]))
@@ -429,6 +473,11 @@ class Bridge:
         async def handler(result: dict[str, Any], late: bool) -> None:
             data = normalize(q, result)
             await self.publish(self.t_state(q.key), data)
+            if q.key not in self._has_data:
+                self._has_data.add(q.key)
+                if self.initialized and self.query_enabled(q.key):
+                    await self.publish_query_discovery(q)
+                    _LOG.info("%s: entities created in Home Assistant", q.device)
             _LOG.info("%s received%s", q.label, " (late)" if late else "")
             if q.key == "device":
                 await self._on_device_info(data)
