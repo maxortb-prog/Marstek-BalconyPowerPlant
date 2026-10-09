@@ -98,7 +98,7 @@ Area BalconyPowerPlant
    ├─ BalconyPowerPlant Bluetooth      State, MAC                                                         (BLE.GetStatus)
    ├─ BalconyPowerPlant Battery        SOC, Temperature, Remaining/Rated capacity, Charging/Discharging allowed (Bat.GetStatus)
    ├─ BalconyPowerPlant PV             PV1–PV4 power, voltage, current, working                           (PV.GetStatus)
-   ├─ BalconyPowerPlant Energy system  SOC, Battery capacity, PV/Grid/Off-grid/Battery power, energy counters (ES.GetStatus)
+   ├─ BalconyPowerPlant Energy system  SOC, Battery capacity, PV/Grid/Off-grid/Battery power, energy counters, Total PV energy (corrected) (ES.GetStatus)
    └─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
 ```
 
@@ -175,6 +175,8 @@ The log level can be changed at runtime with the select *Log level*.
 - There is no getter for DOD, LED and Bluetooth – HA shows the last value
   confirmed by the device (`set_result: true`).
 - `Ble.Adv` is inverted: `enable: 0` = on, `1` = off. The bridge handles this.
+- `total_pv_energy` (ES.GetStatus) is reported 10× too small by the firmware (doc: [Wh]).
+  *Total PV energy (corrected)* = raw value × 10; the raw value stays available for comparison.
 - Passive mode falls back after `cd_time` – repeat *Apply mode* in time.
 - If `core-mosquitto` cannot be resolved (host network), use `127.0.0.1`.
 

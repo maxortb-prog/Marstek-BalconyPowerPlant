@@ -28,6 +28,8 @@ class Field:
     diagnostic: bool = False
     icon: str | None = None
     numeric: bool = True
+    source: str | None = None     # derived field: read this key instead of `key`
+    factor: float | None = None   # derived field: multiply the source value
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,11 @@ QUERIES: dict[str, Query] = {
         Field("bat_power", "Battery power", unit="W", device_class="power", state_class="measurement"),
         Field("total_pv_energy", "Total PV energy", unit="Wh", device_class="energy",
               state_class="total_increasing"),
+        # Firmware reports total_pv_energy 10x too small (API doc says [Wh]).
+        # Firmware liefert total_pv_energy um Faktor 10 zu klein (laut Doku [Wh]).
+        Field("total_pv_energy_corrected", "Total PV energy (corrected)", unit="Wh",
+              device_class="energy", state_class="total_increasing",
+              source="total_pv_energy", factor=10),
         Field("total_grid_output_energy", "Total grid output energy", unit="Wh",
               device_class="energy", state_class="total_increasing"),
         Field("total_grid_input_energy", "Total grid input energy", unit="Wh",
@@ -213,7 +220,13 @@ def normalize(query: Query, result: dict[str, Any]) -> dict[str, Any]:
     """
     out = dict(result)
     for f in query.fields:
-        val = result.get(f.key)
+        val = result.get(f.source or f.key)
+        if f.factor is not None:
+            num = _to_number(val)
+            if isinstance(num, (int, float)) and not isinstance(num, bool):
+                val = round(num * f.factor, 3)
+            else:
+                val = None
         if f.component == "binary_sensor":
             if val is None:
                 out[f.key] = None

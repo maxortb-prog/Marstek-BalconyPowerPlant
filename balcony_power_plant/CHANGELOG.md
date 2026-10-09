@@ -3,6 +3,16 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.2.1] – 2026-10-09
+
+### Added / Neu
+- Sensor *Total PV energy (corrected)* in device *Energy system*: `total_pv_energy` × 10 (Wh),
+  usable in the energy dashboard. The firmware reports this counter 10× too small.
+  / Sensor *Total PV energy (corrected)*: `total_pv_energy` × 10 (Wh), fürs Energie-Dashboard
+  geeignet. Die Firmware liefert diesen Zähler um Faktor 10 zu klein.
+- Raw sensor *Total PV energy* is kept for comparison (e.g. after a firmware fix)
+  / Rohwert-Sensor *Total PV energy* bleibt zum Vergleich erhalten
+
 ## [0.2.0] – 2026-10-09
 
 ### Changed / Geändert
