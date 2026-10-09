@@ -36,6 +36,7 @@ JSON-RPC)** and publishes everything to HA via **MQTT discovery** as the device
 | `passive_power` | `0` | Passive mode power in W (+ feed in, − charge) |
 | `passive_cd_time` | `300` | Passive mode countdown in s |
 | `query_*` | `true` | Which queries are enabled (creates/removes their entities) |
+| `lf_*` | – | Load following, see below / siehe unten |
 | `log_level` | `info` | `trace`, `debug`, `info`, `warning`, `error` |
 
 ### Single source of truth (write-back)
@@ -99,7 +100,8 @@ Area BalconyPowerPlant
    ├─ BalconyPowerPlant Battery        SOC, Temperature, Remaining/Rated capacity, Charging/Discharging allowed (Bat.GetStatus)
    ├─ BalconyPowerPlant PV             PV1–PV4 power, voltage, current, working                           (PV.GetStatus)
    ├─ BalconyPowerPlant Energy system  SOC, Battery capacity, PV/Grid/Off-grid/Battery power, energy counters, Total PV energy (corrected) (ES.GetStatus)
-   └─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
+   ├─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
+   └─ BalconyPowerPlant Load following  Load following, settings, state, diagnostics (ES.SetMode Passive)
 ```
 
 Every query device additionally contains **Enable query** (switch) and **Request** (button).
@@ -147,6 +149,93 @@ actions:
 
 Check the real entity ids in HA – they depend on your language/installation.
 
+## Load following
+
+Regulates the battery output to the grid power measured by a meter (e.g. a Shelly
+on phase C) so that peaks are covered from the battery and **nothing is fed into
+the grid**. It uses `ES.SetMode` Passive with power and `cd_time`.
+
+### Sensor
+
+The grid power is sent **event driven** to the MQTT topic `lf_sensor_topic`
+(default `Shelly Phase C RAW`): plain number in W, positive = import, negative =
+export (JSON like `{"power": 123}` works as well). Example automation:
+
+```yaml
+alias: BalconyPowerPlant Shelly Phase C RAW
+triggers:
+  - trigger: state
+    entity_id: sensor.shelly_phase_c
+conditions:
+  - condition: template
+    value_template: "{{ states('sensor.shelly_phase_c') not in ['unknown','unavailable','none',''] }}"
+actions:
+  - action: mqtt.publish
+    data:
+      topic: Shelly Phase C RAW
+      payload: "{{ states('sensor.shelly_phase_c') | float(0) | round(0) }}"
+      qos: 0
+      retain: false
+mode: queued
+```
+
+### How it works
+
+The meter sees `grid = load − battery output`. The regulator therefore
+reconstructs the load from the setpoint it has sent and does not mistake its own
+changes for load changes (no overshoot):
+
+```
+estimated load = grid (averaged) + active setpoint
+setpoint       = estimated load − target grid power        limited to [0 | minimum … limit]
+```
+
+| Grid power (averaged) | Action |
+|---|---|
+| above **Deadband upper** (15 W) | regulate up – average over *Averaging time regulate up* (12 s), max. *Ramp up step* (100 W) per step |
+| between lower and upper | idle – only keep-alive |
+| below **Deadband lower** (0 W) | regulate down immediately – average over *Averaging time regulate down* (5 s) |
+
+- Regulation target is **Target grid power** (8 W, slight import).
+- A setpoint below **Minimum power** (50 W) is sent as **0 W**.
+- **Export reaction**: *Calculated* (default) jumps directly to the calculated
+  setpoint, *Minimum* drops to the minimum power and regulates up again.
+- After every setpoint change the regulator waits **Settle time** (5 s).
+- **Keep-alive**: if nothing has to be changed, the same setpoint is re-sent at
+  **Keepalive at** (50 %) of **Countdown cd_time** (120 s).
+- **Upper limit** = *Passive power* (device Control). Your SOC dependent automation
+  can keep setting *Passive power* + *Apply mode*: while load following is on this
+  only changes the limit, nothing is sent to the device. If the limit drops below
+  the active setpoint, the setpoint is reduced immediately.
+- **Interlock**: *Apply mode* with Auto / AI / UPS switches load following off.
+  Switching load following off sends 0 W once; afterwards the device falls back
+  when `cd_time` expires.
+- **Sensor timeout** (30 s) without a value → minimum power, state `SENSOR_LOST`.
+- The device is trusted to execute the setpoint (no read-back). A plausibility
+  check only **logs** a *suspected dropout* if the grid power does not drop after
+  two setpoint increases.
+- Setpoint commands have **priority** in the request queue (only the newest one
+  is sent). Queries (e.g. ES/Bat polling from HA) are held back while the
+  regulator is settling (max. 30 s).
+
+Disable your old automation that sends Passive cyclically while load following is on.
+
+### States
+
+| State | Meaning |
+|---|---|
+| OFF | switched off |
+| WAITING | waiting for initialization / first sensor value |
+| REGULATING | setpoint changed, settling / averaging |
+| IDLE | grid power inside the deadband (or setpoint 0 W) |
+| LIMITED | more import, but the setpoint is at the limit |
+| SENSOR_LOST | no sensor value for *Sensor timeout* |
+
+Diagnostic entities: grid power (raw / average up / average down), estimated
+load, active and calculated setpoint, power limit, last command (reason / time),
+keep-alive countdown, counters for setpoint commands, keep-alives, export events,
+suspected dropouts and sensor values.
+
 ## MQTT topics
 
 | Topic | Content |
@@ -154,6 +243,7 @@ Check the real entity ids in HA – they depend on your language/installation.
 | `<base>/availability` | `online` / `offline` |
 | `<base>/state/<query>` | JSON result (`device`, `wifi`, `ble`, `battery`, `pv`, `es_status`, `es_mode`) |
 | `<base>/state/communication` | `INIT` / `ON` / `FAIL` |
+| `<base>/state/load_following` | load following state (JSON) |
 | `<base>/state/stats` | statistics JSON |
 | `<base>/control/<name>` | current value of a control |
 | `<base>/cmd/<name>` | commands (`request/<query>`, `request_all`, `apply_mode`, `dod`, `led`, …) |

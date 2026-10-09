@@ -14,6 +14,15 @@ Options:
     --drop   p     probability to not answer (0..1)         (Antwort-Verlustrate)
     --typo         send "ture" like in the API doc          (ungültiges JSON senden)
     --reply-port   answer to this fixed port instead of the source port
+
+Household / grid meter simulation for load following (Lastfolgeregelung):
+    --grid-topic "Shelly Phase C RAW"   publish grid power = load - output every second
+    --mqtt-host 127.0.0.1 --mqtt-port 1883 [--mqtt-user u --mqtt-password p]
+    --load-steps "0:300,60:650,120:180,180:30"   load profile  t[s]:W  (repeats)
+    --noise 5        +/- W random noise on the load
+    --tau 1.5        s, time constant of the inverter output
+    --dropout-at 90  s, device stops feeding in ...
+    --dropout-for 40 s, ... for this long (0 = until the next setpoint change)
 """
 
 from __future__ import annotations
@@ -35,6 +44,14 @@ class VenusA:
         self.ble_adv = 1
         self.soc = 63
         self.t0 = time.time()
+        self.output = 0.0          # real AC output in W (follows the setpoint)
+        self.dropped = False       # simulated "fell out of regulation"
+        self.dropout_until = 0.0   # >0: dropout ends at this sim time
+
+    def target_output(self) -> float:
+        if self.mode != "Passive" or time.time() > self.passive_until or self.dropped:
+            return 0.0
+        return float(max(0, self.passive_power))
 
     def handle(self, method: str, params: dict) -> dict:
         if self.mode == "Passive" and time.time() > self.passive_until:
@@ -61,9 +78,9 @@ class VenusA:
                             f"pv{i}_state": 1 if p else 0})
             return out
         if method == "ES.GetStatus":
-            bat = -self.passive_power if self.mode == "Passive" else 0
+            bat = round(self.output)
             return {"id": params.get("id"), "bat_soc": self.soc, "bat_cap": 2240,
-                    "pv_power": 360, "ongrid_power": self.passive_power if self.mode == "Passive" else 0,
+                    "pv_power": 360, "ongrid_power": round(self.output),
                     "offgrid_power": 0, "bat_power": bat, "total_pv_energy": 12345,
                     "total_grid_output_energy": 2548, "total_grid_input_energy": 3273,
                     "total_load_energy": 0}
@@ -75,7 +92,10 @@ class VenusA:
             self.mode = cfg.get("mode", self.mode)
             if self.mode == "Passive":
                 pc = cfg.get("passive_cfg", {})
-                self.passive_power = int(pc.get("power", 0))
+                new_power = int(pc.get("power", 0))
+                if new_power != self.passive_power and self.dropout_until == 0:
+                    self.dropped = False       # a new setpoint wakes the device up again
+                self.passive_power = new_power
                 self.passive_until = time.time() + int(pc.get("cd_time", 0))
             return {"id": params.get("id"), "set_result": True}
         if method == "DOD.SET":
@@ -139,6 +159,43 @@ class Proto(asyncio.DatagramProtocol):
         print(f">> #{resp.get('id')} {text[:110]}", flush=True)
 
 
+def parse_steps(text: str) -> list[tuple[float, float]]:
+    steps = []
+    for part in text.split(","):
+        t, w = part.split(":")
+        steps.append((float(t), float(w)))
+    return sorted(steps)
+
+
+async def household(args: argparse.Namespace, dev: VenusA) -> None:
+    """Simulate load, inverter output and the grid meter (Shelly)."""
+    import aiomqtt  # only needed for this mode
+    steps = parse_steps(args.load_steps)
+    period = steps[-1][0] + 60 if len(steps) > 1 else 1e9
+    t0 = time.time()
+    dropout_done = False
+    async with aiomqtt.Client(args.mqtt_host, args.mqtt_port, username=args.mqtt_user,
+                              password=args.mqtt_password, identifier="marstek-sim-grid") as c:
+        while True:
+            await asyncio.sleep(1.0)
+            t = time.time() - t0
+            if args.dropout_at and not dropout_done and t >= args.dropout_at:
+                dev.dropped, dropout_done = True, True
+                dev.dropout_until = t + args.dropout_for if args.dropout_for else 0
+                print(f"!! t={t:.0f}s simulated dropout - device stops feeding in", flush=True)
+            if dev.dropout_until and t >= dev.dropout_until:
+                dev.dropped, dev.dropout_until = False, 0
+                print(f"!! t={t:.0f}s dropout over - device feeds in again", flush=True)
+            load = [w for ts, w in steps if ts <= t % period][-1]
+            load += random.uniform(-args.noise, args.noise)
+            target = dev.target_output()
+            dev.output += (target - dev.output) * (1 - pow(2.718281828, -1.0 / args.tau))
+            grid = load - dev.output
+            await c.publish(args.grid_topic, f"{grid:.0f}")
+            print(f"   t={t:5.0f}s load={load:6.0f} setpoint={dev.passive_power if dev.mode == 'Passive' else '-':>5} "
+                  f"output={dev.output:6.0f} grid={grid:+6.0f}", flush=True)
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="0.0.0.0")
@@ -148,10 +205,24 @@ async def main() -> None:
     ap.add_argument("--drop", type=float, default=0.0)
     ap.add_argument("--typo", action="store_true")
     ap.add_argument("--reply-port", type=int, default=0)
+    ap.add_argument("--grid-topic", default="")
+    ap.add_argument("--mqtt-host", default="127.0.0.1")
+    ap.add_argument("--mqtt-port", type=int, default=1883)
+    ap.add_argument("--mqtt-user", default=None)
+    ap.add_argument("--mqtt-password", default=None)
+    ap.add_argument("--load-steps", default="0:300")
+    ap.add_argument("--noise", type=float, default=5.0)
+    ap.add_argument("--tau", type=float, default=1.5)
+    ap.add_argument("--dropout-at", type=float, default=0.0)
+    ap.add_argument("--dropout-for", type=float, default=0.0)
     args = ap.parse_args()
     loop = asyncio.get_running_loop()
-    await loop.create_datagram_endpoint(lambda: Proto(args), local_addr=(args.host, args.port))
+    proto = Proto(args)
+    await loop.create_datagram_endpoint(lambda: proto, local_addr=(args.host, args.port))
     print(f"Venus A simulator listening on {args.host}:{args.port}", flush=True)
+    if args.grid_topic:
+        print(f"Household simulation -> MQTT topic '{args.grid_topic}'", flush=True)
+        await household(args, proto.dev)
     await asyncio.Event().wait()
 
 

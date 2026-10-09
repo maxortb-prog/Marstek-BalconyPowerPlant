@@ -1,0 +1,441 @@
+"""Load following (Lastfolgeregelung) via ES.SetMode Passive.
+
+EN:
+  Goal: cover the household load with battery power while NEVER feeding into
+  the grid. The grid power measured by a meter (e.g. Shelly, phase C) arrives
+  event driven via MQTT (positive = import, negative = export).
+
+  Decoupling: the meter sees  grid = load - battery output.  The regulator
+  therefore reconstructs the load from the setpoint it has sent:
+        load_est = grid_filtered + active_setpoint
+        target   = load_est - target_grid_power
+  so its own setpoint changes are not mistaken for load changes (no overshoot).
+  The device is trusted to execute the setpoint (no read-back).
+
+  Asymmetric:
+    grid > deadband upper : regulate up   (average over avg_up s, max ramp step)
+    grid < deadband lower : regulate down (average over avg_down s, immediately)
+    in between            : idle, only keep-alive
+  Setpoint < minimum power -> 0 W.  Upper limit = "Passive power" (Control).
+  After every setpoint change the regulator waits settle_time.
+  Keep-alive: the same setpoint is re-sent at keepalive_pct % of cd_time.
+
+DE:
+  Ziel: Hausverbrauch mit Batterieleistung decken, ohne jemals einzuspeisen.
+  Der Netzwert (z. B. Shelly Phase C) kommt ereignisgesteuert per MQTT
+  (positiv = Bezug, negativ = Einspeisung). Die Last wird aus dem gesendeten
+  Sollwert rekonstruiert, damit eigene Sollwertänderungen nicht als
+  Lastwechsel erscheinen. Hochregeln langsam (Mittelwert, Rampe), runterregeln
+  sofort. Sollwert unter Minimum -> 0 W. Obergrenze = "Passive power".
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from collections import deque
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
+
+from logger import get_logger
+from marstek_api import set_mode_params
+
+if TYPE_CHECKING:
+    from bridge import Bridge
+
+_LOG = get_logger("loadfollow")
+
+# states
+OFF = "OFF"
+WAITING = "WAITING"            # enabled, waiting for initialization / sensor
+REGULATING = "REGULATING"      # setpoint changed, waiting for settle / averaging
+IDLE = "IDLE"                  # grid inside deadband
+LIMITED = "LIMITED"            # import above deadband but setpoint = upper limit
+SENSOR_LOST = "SENSOR_LOST"
+
+EXPORT_CALCULATED = "Calculated"
+EXPORT_MINIMUM = "Minimum"
+EXPORT_REACTIONS = [EXPORT_CALCULATED, EXPORT_MINIMUM]
+
+TICK = 1.0                 # s, timer for timeouts / keep-alive
+SAMPLE_HISTORY = 120.0     # s of sensor samples kept
+DROPOUT_MIN_STEP = 50      # W, only setpoint increases >= this are checked
+DROPOUT_WINDOW = 3.0       # s after settle used for the plausibility check
+DROPOUT_RATIO = 0.3        # grid must drop by at least 30 % of the step
+DROPOUT_STRIKES = 2        # consecutive failed checks -> "suspected dropout"
+
+# option key -> (HA name, min, max, step, unit, default)
+NUMBERS: dict[str, tuple[str, float, float, float, str | None, float]] = {
+    "lf_target_power":    ("Target grid power", -50, 200, 1, "W", 8),
+    "lf_deadband_upper":  ("Deadband upper", -50, 300, 1, "W", 15),
+    "lf_deadband_lower":  ("Deadband lower", -100, 200, 1, "W", 0),
+    "lf_min_power":       ("Minimum power", 0, 400, 5, "W", 50),
+    "lf_ramp_step":       ("Ramp up step", 10, 1200, 10, "W", 100),
+    "lf_settle_time":     ("Settle time", 1, 60, 1, "s", 5),
+    "lf_avg_up":          ("Averaging time regulate up", 1, 60, 1, "s", 12),
+    "lf_avg_down":        ("Averaging time regulate down", 1, 60, 1, "s", 5),
+    "lf_cd_time":         ("Countdown cd_time", 30, 3600, 10, "s", 120),
+    "lf_keepalive_pct":   ("Keepalive at", 10, 90, 5, "%", 50),
+    "lf_sensor_timeout":  ("Sensor timeout", 5, 300, 5, "s", 30),
+}
+
+
+class LoadFollower:
+    def __init__(self, bridge: "Bridge") -> None:
+        self.b = bridge
+        self.opts = bridge.opts
+        self.samples: deque[tuple[float, float]] = deque()
+        self.state = OFF
+        self.setpoint: int | None = None        # last sent setpoint (trusted)
+        self.last_change: float = 0.0           # monotonic time of last setpoint change
+        self.last_send: float = 0.0             # monotonic time of last command (incl. keep-alive)
+        self.last_reason = "-"
+        self.last_cmd_ts: str | None = None
+        self.avg_up: float | None = None
+        self.avg_down: float | None = None
+        self.load_est: float | None = None
+        self.target_sp: float | None = None
+        self.in_export = False
+        self.counters = {"commands": 0, "keepalives": 0, "export_events": 0,
+                         "suspected_dropouts": 0, "sensor_values": 0, "invalid_values": 0}
+        self._check: dict[str, Any] | None = None     # pending plausibility check
+        self._strikes = 0
+        self._dirty = True
+        self._task: asyncio.Task | None = None
+        self._last_invalid_log = 0.0
+
+    # ------------------------------------------------------------- options
+    def o(self, key: str) -> float:
+        try:
+            return float(self.opts.get(key, NUMBERS[key][5]))
+        except (TypeError, ValueError):
+            return float(NUMBERS[key][5])
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.opts.get("lf_enabled", False))
+
+    @property
+    def export_reaction(self) -> str:
+        v = str(self.opts.get("lf_export_reaction", EXPORT_CALCULATED))
+        return v if v in EXPORT_REACTIONS else EXPORT_CALCULATED
+
+    @property
+    def cap(self) -> int:
+        """Upper limit = Passive power (Control), limited to max_power, >= 0."""
+        try:
+            p = int(self.opts.get("passive_power", 0))
+        except (TypeError, ValueError):
+            p = 0
+        return max(0, min(p, self.opts.max_power))
+
+    @property
+    def regulating(self) -> bool:
+        """True while a new setpoint is settling -> queries are held back."""
+        return (self.enabled and self.setpoint is not None
+                and time.monotonic() < self.last_change + self.o("lf_settle_time"))
+
+    # ----------------------------------------------------------- lifecycle
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._loop(), name="load-following")
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+    async def _loop(self) -> None:
+        while True:
+            await asyncio.sleep(TICK)
+            try:
+                self.evaluate()
+            except Exception:  # noqa: BLE001
+                _LOG.exception("Load following evaluation failed")
+            if self.enabled:
+                self._dirty = True               # keep-alive countdown changes every tick
+            if self._dirty and self.b.client is not None:
+                self._dirty = False
+                await self.b.publish(self.b.t_state("load_following"), self.snapshot())
+
+    def set_enabled(self, on: bool, reason: str) -> None:
+        if on == self.enabled:
+            return
+        self.opts.set("lf_enabled", on)
+        self._check, self._strikes = None, 0
+        if on:
+            _LOG.info("Load following ENABLED (%s) - starting at 0 W, limit %d W",
+                      reason, self.cap)
+            self.setpoint = None
+            self.state = WAITING
+            self.evaluate()
+        else:
+            _LOG.info("Load following DISABLED (%s)", reason)
+            if self.setpoint and self.b.initialized and reason != "mode change":
+                # leave the device in a safe state: 0 W until cd_time expires
+                self._send(0, "disabled", change=True)
+            self.state = OFF
+        self._dirty = True
+
+    # -------------------------------------------------------------- sensor
+    def on_sensor(self, payload: str) -> None:
+        value = self._parse(payload)
+        now = time.monotonic()
+        if value is None:
+            self.counters["invalid_values"] += 1
+            if now - self._last_invalid_log > 60:
+                self._last_invalid_log = now
+                _LOG.warning("Grid sensor: invalid payload %r ignored", payload)
+            return
+        self.samples.append((now, value))
+        while self.samples and now - self.samples[0][0] > SAMPLE_HISTORY:
+            self.samples.popleft()
+        self.counters["sensor_values"] += 1
+        _LOG.trace("Grid sensor %.0f W", value)
+        self._dirty = True
+        if self.enabled:
+            self.evaluate()            # event driven
+
+    @staticmethod
+    def _parse(payload: str) -> float | None:
+        text = payload.strip()
+        try:
+            return float(text)
+        except ValueError:
+            pass
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(data, (int, float)) and not isinstance(data, bool):
+            return float(data)
+        if isinstance(data, dict):
+            for key in ("power", "value", "act_power", "apower", "state"):
+                try:
+                    return float(data[key])
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return None
+
+    def _avg(self, window: float, since: float, now: float) -> float | None:
+        """Average of the samples of the last `window` s that are newer than
+        `since`. None if the window is not yet fully covered."""
+        start = now - window
+        if start < since:
+            return None
+        vals = [v for t, v in self.samples if t >= start]
+        return sum(vals) / len(vals) if vals else None
+
+    # ---------------------------------------------------------- regulation
+    def evaluate(self) -> None:
+        if not self.enabled:
+            if self.state != OFF:
+                self.state, self._dirty = OFF, True
+            return
+        now = time.monotonic()
+        if not self.b.initialized:
+            self._set_state(WAITING)
+            return
+
+        # --- sensor watchdog ----------------------------------------------
+        timeout = self.o("lf_sensor_timeout")
+        if not self.samples or now - self.samples[-1][0] > timeout:
+            if self.state != SENSOR_LOST and self.samples:
+                _LOG.error("Grid sensor: no value for %.0f s - falling back to minimum power",
+                           timeout)
+            if self.samples or self.setpoint is not None:
+                self._set_state(SENSOR_LOST)
+                fallback = min(int(self.o("lf_min_power")), self.cap)
+                if self.setpoint != fallback:
+                    self._send(fallback, "sensor lost", change=True)
+                self._keepalive(now)
+            else:
+                self._set_state(WAITING)
+            return
+
+        if self.setpoint is None:                  # just enabled
+            self._send(0, "start", change=True)
+            self._set_state(REGULATING)
+            return
+
+        # --- upper limit lowered (Passive power from HA) ------------------
+        cap = self.cap
+        if self.setpoint > cap:
+            self._send(cap, f"limit {cap} W", change=True)
+            self._set_state(REGULATING)
+            return
+
+        settle_end = self.last_change + self.o("lf_settle_time")
+        self._plausibility(now, settle_end)
+        if now < settle_end:
+            self._set_state(REGULATING)
+            self._keepalive(now)
+            return
+
+        self.avg_up = self._avg(self.o("lf_avg_up"), settle_end, now)
+        self.avg_down = self._avg(self.o("lf_avg_down"), settle_end, now)
+        upper, lower = self.o("lf_deadband_upper"), self.o("lf_deadband_lower")
+        target = self.o("lf_target_power")
+        min_p = int(self.o("lf_min_power"))
+
+        # --- regulate down (export side, fast) ----------------------------
+        if self.avg_down is not None and self.avg_down < lower:
+            latest = self.samples[-1][1]
+            grid = min(self.avg_down, latest)      # err on the safe side (more import)
+            self.load_est = grid + self.setpoint
+            self.target_sp = self.load_est - target
+            if grid < 0 and not self.in_export:
+                self.in_export = True
+                self.counters["export_events"] += 1
+                _LOG.warning("Export detected: %.0f W (avg %.1f s)", grid, self.o("lf_avg_down"))
+            if self.export_reaction == EXPORT_MINIMUM and grid < 0:
+                new = min_p
+            else:
+                new = int(round(self.target_sp))
+            new = self._limit(new, min_p, cap)
+            if new < self.setpoint:
+                self._send(new, f"down {grid:+.0f} W", change=True)
+                self._set_state(REGULATING)
+                return
+            self._set_state(IDLE)              # already at 0 / nothing lower possible
+            self._keepalive(now)
+            return
+        if self.avg_down is not None and self.avg_down >= 0:
+            self.in_export = False
+
+        # --- regulate up (import side, slow + ramp) -----------------------
+        if self.avg_up is not None and self.avg_up > upper:
+            self.load_est = self.avg_up + self.setpoint
+            self.target_sp = self.load_est - target
+            new = self._limit(int(round(self.target_sp)), min_p, cap)
+            new = min(new, self.setpoint + int(self.o("lf_ramp_step")))
+            if new > self.setpoint:
+                self._start_check(new - self.setpoint, self.avg_up, now)
+                self._send(new, f"up {self.avg_up:+.0f} W", change=True)
+                self._set_state(REGULATING)
+                return
+            self._set_state(LIMITED if self.setpoint >= cap and cap > 0 else IDLE)
+            self._keepalive(now)
+            return
+
+        # --- inside deadband ------------------------------------------------
+        if self.avg_up is not None:
+            self.load_est = self.avg_up + self.setpoint
+            self.target_sp = self.load_est - target
+        self._set_state(IDLE if self.avg_up is not None else REGULATING)
+        self._keepalive(now)
+
+    @staticmethod
+    def _limit(value: int, min_p: int, cap: int) -> int:
+        if value < min_p:
+            return 0                     # below minimum power -> 0 W
+        return max(0, min(value, cap))
+
+    def _set_state(self, state: str) -> None:
+        if state != self.state:
+            _LOG.debug("State %s -> %s", self.state, state)
+            self.state = state
+            self._dirty = True
+
+    def _keepalive(self, now: float) -> None:
+        if self.setpoint is None:
+            return
+        interval = self.o("lf_cd_time") * self.o("lf_keepalive_pct") / 100.0
+        if now - self.last_send >= interval:
+            self.counters["keepalives"] += 1
+            self._send(self.setpoint, "keepalive", change=False)
+
+    def keepalive_in(self) -> float | None:
+        if self.setpoint is None or not self.enabled:
+            return None
+        interval = self.o("lf_cd_time") * self.o("lf_keepalive_pct") / 100.0
+        return max(0.0, round(interval - (time.monotonic() - self.last_send), 1))
+
+    def _send(self, power: int, reason: str, change: bool) -> None:
+        cd_time = int(self.o("lf_cd_time"))
+        now = time.monotonic()
+        old = self.setpoint
+        self.setpoint = power
+        self.last_send = now
+        if change:
+            self.last_change = now
+            self.counters["commands"] += 1
+        self.last_reason = reason
+        self.last_cmd_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self._dirty = True
+        log = _LOG.debug if reason == "keepalive" else _LOG.info
+        log("Setpoint %s -> %d W (%s, cd_time %d s)",
+            "-" if old is None else f"{old} W", power, reason, cd_time)
+
+        async def handler(result: dict[str, Any], late: bool) -> None:
+            if str(result.get("set_result")).lower() not in ("true", "1", "ture"):
+                _LOG.error("Setpoint %d W rejected by device: %s", power, result)
+
+        self.b.udp.submit(
+            "ES.SetMode",
+            lambda i: set_mode_params(i, "Passive", power, cd_time),
+            handler=handler, priority=True, coalesce="lf_setpoint",
+        )
+
+    # ------------------------------------------- plausibility (log only)
+    def _start_check(self, step: int, grid_before: float, now: float) -> None:
+        if step >= DROPOUT_MIN_STEP:
+            self._check = {"step": step, "before": grid_before, "t": now}
+        else:
+            self._check = None
+
+    def _plausibility(self, now: float, settle_end: float) -> None:
+        c = self._check
+        if not c:
+            return
+        if self.last_change - c["t"] > 0.5:     # another setpoint change since -> discard
+            self._check = None
+            return
+        if now < settle_end + DROPOUT_WINDOW:
+            return
+        self._check = None
+        vals = [v for t, v in self.samples if settle_end <= t <= settle_end + DROPOUT_WINDOW]
+        if not vals:
+            return
+        after = sum(vals) / len(vals)
+        drop = c["before"] - after
+        if drop < DROPOUT_RATIO * c["step"]:
+            self._strikes += 1
+            _LOG.debug("Plausibility: setpoint +%d W, grid only %.0f -> %.0f W (strike %d)",
+                       c["step"], c["before"], after, self._strikes)
+            if self._strikes >= DROPOUT_STRIKES:
+                self.counters["suspected_dropouts"] += 1
+                _LOG.warning(
+                    "Suspected dropout: device did not follow the last %d setpoint increases "
+                    "(last +%d W, grid %.0f -> %.0f W, setpoint %d W, commands %d, keepalives %d)"
+                    " - logged only, no action",
+                    self._strikes, c["step"], c["before"], after, self.setpoint or 0,
+                    self.counters["commands"], self.counters["keepalives"])
+                self._strikes = 0
+                self._dirty = True
+        else:
+            self._strikes = 0
+
+    # ---------------------------------------------------------------- state
+    def snapshot(self) -> dict[str, Any]:
+        def r(v: float | None) -> float | None:
+            return None if v is None else round(v, 1)
+        return {
+            "state": self.state,
+            "grid_raw": r(self.samples[-1][1]) if self.samples else None,
+            "grid_avg_up": r(self.avg_up),
+            "grid_avg_down": r(self.avg_down),
+            "load_estimated": r(self.load_est),
+            "setpoint": self.setpoint,
+            "setpoint_target": r(self.target_sp),
+            "power_limit": self.cap,
+            "last_reason": self.last_reason,
+            "last_command": self.last_cmd_ts,
+            "keepalive_in": self.keepalive_in(),
+            **self.counters,
+        }

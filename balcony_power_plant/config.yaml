@@ -1,5 +1,5 @@
 name: BalconyPowerPlant
-version: "0.2.1"
+version: "0.3.0"
 slug: balcony_power_plant
 description: >-
   Local UDP bridge between a Marstek Venus battery (Open API Rev 2.0)
@@ -50,6 +50,21 @@ options:
   query_pv: true
   query_es_status: true
   query_es_mode: true
+  # --- Load following ---
+  lf_enabled: false
+  lf_sensor_topic: "Shelly Phase C RAW"
+  lf_export_reaction: "Calculated"
+  lf_target_power: 8
+  lf_deadband_upper: 15
+  lf_deadband_lower: 0
+  lf_min_power: 50
+  lf_ramp_step: 100
+  lf_settle_time: 5
+  lf_avg_up: 12
+  lf_avg_down: 5
+  lf_cd_time: 120
+  lf_keepalive_pct: 50
+  lf_sensor_timeout: 30
   # --- Logging ---
   log_level: info
 schema:
@@ -82,4 +97,18 @@ schema:
   query_pv: bool
   query_es_status: bool
   query_es_mode: bool
+  lf_enabled: bool
+  lf_sensor_topic: "str?"
+  lf_export_reaction: list(Calculated|Minimum)
+  lf_target_power: int(-50,200)
+  lf_deadband_upper: int(-50,300)
+  lf_deadband_lower: int(-100,200)
+  lf_min_power: int(0,400)
+  lf_ramp_step: int(10,1200)
+  lf_settle_time: int(1,60)
+  lf_avg_up: int(1,60)
+  lf_avg_down: int(1,60)
+  lf_cd_time: int(30,3600)
+  lf_keepalive_pct: int(10,90)
+  lf_sensor_timeout: int(5,300)
   log_level: list(trace|debug|info|warning|error)

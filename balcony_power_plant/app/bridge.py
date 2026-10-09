@@ -23,6 +23,7 @@ from typing import Any
 import aiomqtt
 
 from config import OptionsStore
+from load_following import EXPORT_REACTIONS, NUMBERS as LF_NUMBERS, LoadFollower
 from logger import get_logger, set_level
 from marstek_api import (
     MODES,
@@ -85,6 +86,8 @@ class Bridge:
             on_watchdog=self._on_watchdog,
             on_stats=self._on_stats,
         )
+        self.lf = LoadFollower(self)
+        self.udp.hold_queries = lambda: self.lf.regulating
 
     # ================================================================ helpers
     def _comm_from_options(self) -> CommSettings:
@@ -103,6 +106,10 @@ class Bridge:
 
     def t_cmd(self, name: str) -> str:
         return f"{self.base}/cmd/{name}"
+
+    @property
+    def t_sensor(self) -> str:
+        return str(self.opts.get("lf_sensor_topic") or "").strip()
 
     @property
     def t_avail(self) -> str:
@@ -340,6 +347,66 @@ class Bridge:
         add(comm, "sensor", "stats_last_response", "Last response",
             stat_t=self.t_state("stats"), val_tpl="{{ value_json.last_response }}",
             dev_cla="timestamp", ent_cat="diagnostic")
+        ents += self._lf_entities()
+        return ents
+
+    def _lf_entities(self) -> list[tuple[str, str, dict]]:
+        dev = self._device_block("load_following", "Load following", "ES.SetMode Passive")
+        ents: list[tuple[str, str, dict]] = []
+
+        def add(component: str, key: str, name: str, **extra: Any) -> None:
+            cfg = self._base_cfg(key, name, dev)
+            cfg.update(extra)
+            ents.append((component, key, cfg))
+
+        add("switch", "lf_enabled", "Load following",
+            cmd_t=self.t_cmd("lf_enabled"), stat_t=self.t_ctrl("lf_enabled"),
+            ic="mdi:home-lightning-bolt")
+        add("select", "lf_export_reaction", "Export reaction",
+            cmd_t=self.t_cmd("lf_export_reaction"), stat_t=self.t_ctrl("lf_export_reaction"),
+            ops=EXPORT_REACTIONS, ent_cat="config", ic="mdi:transmission-tower-off")
+        for key, (name, lo, hi, step, unit, _default) in LF_NUMBERS.items():
+            extra: dict[str, Any] = {"cmd_t": self.t_cmd(key), "stat_t": self.t_ctrl(key),
+                                     "min": lo, "max": hi, "step": step, "mode": "box",
+                                     "ent_cat": "config"}
+            if unit:
+                extra["unit_of_meas"] = unit
+            add("number", key, name, **extra)
+
+        st = self.t_state("load_following")
+        add("sensor", "lf_state", "State", stat_t=st, val_tpl="{{ value_json.state }}",
+            dev_cla="enum", ops=["OFF", "WAITING", "REGULATING", "IDLE", "LIMITED", "SENSOR_LOST"],
+            ic="mdi:state-machine")
+        for key, name, icon in (
+            ("grid_raw", "Grid power", "mdi:transmission-tower"),
+            ("grid_avg_up", "Grid power average up", "mdi:chart-bell-curve"),
+            ("grid_avg_down", "Grid power average down", "mdi:chart-bell-curve"),
+            ("load_estimated", "Estimated load", "mdi:home-lightning-bolt-outline"),
+            ("setpoint", "Active setpoint", "mdi:target"),
+            ("setpoint_target", "Calculated setpoint", "mdi:calculator"),
+            ("power_limit", "Power limit", "mdi:arrow-collapse-up"),
+        ):
+            add("sensor", f"lf_{key}", name, stat_t=st,
+                val_tpl=f"{{{{ value_json.{key} }}}}", unit_of_meas="W",
+                dev_cla="power", stat_cla="measurement", ic=icon)
+        add("sensor", "lf_last_reason", "Last command reason", stat_t=st,
+            val_tpl="{{ value_json.last_reason }}", ic="mdi:comment-text-outline")
+        add("sensor", "lf_last_command", "Last command", stat_t=st,
+            val_tpl="{{ value_json.last_command }}", dev_cla="timestamp")
+        add("sensor", "lf_keepalive_in", "Keepalive in", stat_t=st,
+            val_tpl="{{ value_json.keepalive_in }}", unit_of_meas="s",
+            ic="mdi:timer-refresh-outline")
+        for key, name, icon in (
+            ("commands", "Setpoint commands", "mdi:counter"),
+            ("keepalives", "Keepalives sent", "mdi:counter"),
+            ("export_events", "Export events", "mdi:transmission-tower-export"),
+            ("suspected_dropouts", "Suspected dropouts", "mdi:alert"),
+            ("sensor_values", "Sensor values received", "mdi:counter"),
+            ("invalid_values", "Invalid sensor values", "mdi:alert-circle-outline"),
+        ):
+            add("sensor", f"lf_{key}", name, stat_t=st,
+                val_tpl=f"{{{{ value_json.{key} }}}}", stat_cla="total_increasing",
+                ent_cat="diagnostic", ic=icon)
         return ents
 
     async def publish_all_discovery(self) -> None:
@@ -367,6 +434,11 @@ class Bridge:
             await self.publish(self.t_ctrl(f"query_{q.key}"), _on_off(self.query_enabled(q.key)))
         if self.mode_select:
             await self.publish(self.t_ctrl("mode_select"), self.mode_select)
+        await self.publish(self.t_ctrl("lf_enabled"), _on_off(self.lf.enabled))
+        await self.publish(self.t_ctrl("lf_export_reaction"), self.lf.export_reaction)
+        for key in LF_NUMBERS:
+            await self.publish(self.t_ctrl(key), self.lf.o(key))
+        await self.publish(self.t_state("load_following"), self.lf.snapshot())
 
     async def _publish_comm_pending(self) -> None:
         c = self.comm_pending
@@ -380,6 +452,10 @@ class Bridge:
         self.client = client
         await client.subscribe(f"{self.base}/cmd/#")
         await client.subscribe(f"{self.prefix}/status")
+        if self.t_sensor:
+            await client.subscribe(self.t_sensor)
+            _LOG.info("Load following: grid sensor topic '%s'", self.t_sensor)
+        self.lf.start()
         await self.publish(self.t_avail, "online")
         await self.publish_all_discovery()
         await self.publish_initial_states()
@@ -393,6 +469,7 @@ class Bridge:
             self._init_task.cancel()
         for task in list(self._bg):
             task.cancel()
+        await self.lf.stop()
         await self.udp.stop()
 
     def on_disconnected(self) -> None:
@@ -557,6 +634,15 @@ class Bridge:
         if mode is None:
             _LOG.warning("Apply mode ignored - no operating mode selected yet")
             return
+        if self.lf.enabled:
+            if mode == "Passive":
+                # load following owns the device: Passive power is only the upper limit
+                _LOG.info("Apply mode: load following active - power limit now %d W",
+                          self.lf.cap)
+                self.lf.evaluate()
+                return
+            self.lf.set_enabled(False, "mode change")
+            self._spawn(self.publish(self.t_ctrl("lf_enabled"), "OFF"))
         mp = self.opts.max_power
         power = max(-mp, min(mp, int(self.opts["passive_power"])))
         cd_time = int(self.opts["passive_cd_time"])
@@ -584,6 +670,10 @@ class Bridge:
                     await self.publish(t, p)
             return
 
+        if self.t_sensor and topic == self.t_sensor:
+            self.lf.on_sensor(payload)
+            return
+
         prefix = f"{self.base}/cmd/"
         if not topic.startswith(prefix):
             return
@@ -606,6 +696,22 @@ class Bridge:
             await self.publish(self.t_ctrl(f"query_{key}"), _on_off(on))
             await self.publish_query_discovery(q)
             _LOG.info("%s %s", q.label, "enabled" if on else "disabled")
+        elif cmd == "lf_enabled":
+            self.lf.set_enabled(on, "Home Assistant")
+            await self.publish(self.t_ctrl("lf_enabled"), _on_off(self.lf.enabled))
+        elif cmd == "lf_export_reaction":
+            if payload not in EXPORT_REACTIONS:
+                raise ValueError("unknown export reaction")
+            self.opts.set("lf_export_reaction", payload)
+            await self.publish(self.t_ctrl("lf_export_reaction"), payload)
+            _LOG.info("Load following: export reaction %s", payload)
+        elif cmd in LF_NUMBERS:
+            _name, lo, hi, _step, _unit, _d = LF_NUMBERS[cmd]
+            value = max(lo, min(hi, float(payload)))
+            value = int(value) if float(value).is_integer() else value
+            self.opts.set(cmd, value)
+            await self.publish(self.t_ctrl(cmd), value)
+            _LOG.info("Load following: %s = %s", LF_NUMBERS[cmd][0], value)
         elif cmd == "mode_select":
             match = next((m for m in MODES if m.lower() == payload.lower()), None)
             if match is None:
@@ -617,6 +723,8 @@ class Bridge:
             value = max(-mp, min(mp, int(round(float(payload)))))
             self.opts.set("passive_power", value)
             await self.publish(self.t_ctrl("passive_power"), value)
+            if self.lf.enabled:
+                self.lf.evaluate()
         elif cmd == "passive_cd_time":
             value = max(0, min(86400, int(round(float(payload)))))
             self.opts.set("passive_cd_time", value)

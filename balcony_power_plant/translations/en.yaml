@@ -84,6 +84,48 @@ configuration:
   query_es_mode:
     name: "Enable energy system mode"
     description: "ES.GetMode"
+  lf_enabled:
+    name: "Load following"
+    description: "Regulate the battery output to the grid sensor (no feed-in). Also switchable in HA."
+  lf_sensor_topic:
+    name: "Grid sensor topic"
+    description: "MQTT topic with the grid power in W (positive = import, negative = export). Plain number or JSON."
+  lf_export_reaction:
+    name: "Export reaction"
+    description: "Calculated: setpoint = estimated load - target. Minimum: drop to minimum power."
+  lf_target_power:
+    name: "Target grid power"
+    description: "W, regulation target (slight import)."
+  lf_deadband_upper:
+    name: "Deadband upper"
+    description: "W, above: regulate up."
+  lf_deadband_lower:
+    name: "Deadband lower"
+    description: "W, below: regulate down."
+  lf_min_power:
+    name: "Minimum power"
+    description: "W, a lower setpoint is sent as 0 W."
+  lf_ramp_step:
+    name: "Ramp up step"
+    description: "W, max. increase per step."
+  lf_settle_time:
+    name: "Settle time"
+    description: "s, wait after each setpoint change."
+  lf_avg_up:
+    name: "Averaging time regulate up"
+    description: "s, average of the grid power for regulating up."
+  lf_avg_down:
+    name: "Averaging time regulate down"
+    description: "s, average of the grid power for regulating down."
+  lf_cd_time:
+    name: "Countdown cd_time"
+    description: "s, cd_time sent with every setpoint."
+  lf_keepalive_pct:
+    name: "Keepalive at"
+    description: "% of cd_time after which the setpoint is re-sent."
+  lf_sensor_timeout:
+    name: "Sensor timeout"
+    description: "s without sensor value -> minimum power."
   log_level:
     name: "Log level"
     description: "trace, debug, info, warning, error"

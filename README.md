@@ -12,6 +12,7 @@ discovery**. Everything appears in the area **BalconyPowerPlant**: one main devi
   `PV.GetStatus`, `ES.GetStatus`, `ES.GetMode` – each one can be enabled/disabled
 - Control: `ES.SetMode` (Auto / AI / UPS / Passive) with an *Apply mode* button
 - Settings: `DOD.SET`, `Led.Ctrl`, `Ble.Adv`
+- **Load following**: event driven zero-export regulation via Passive mode from a grid meter MQTT topic (e.g. Shelly)
 - Request queue with delay / timeout / retries / watchdog, or fire mode
 - Communication state INIT / ON / FAIL and request statistics
 - Runtime changes are written back to the add-on configuration

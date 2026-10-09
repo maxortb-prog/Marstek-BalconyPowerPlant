@@ -12,6 +12,7 @@ verbindet. Alles erscheint im Bereich **BalconyPowerPlant**: ein Hauptgerät plu
   `PV.GetStatus`, `ES.GetStatus`, `ES.GetMode` – jede einzeln ein-/ausschaltbar
 - Steuerung: `ES.SetMode` (Auto / AI / UPS / Passive) mit Button *Apply mode*
 - Einstellungen: `DOD.SET`, `Led.Ctrl`, `Ble.Adv`
+- **Load following** (Lastfolgeregelung): ereignisgesteuerte Nulleinspeisung über den Passive-Modus nach einem Zähler-Topic (z. B. Shelly)
 - Anfrage-Queue mit Delay / Timeout / Retries / Watchdog oder Fire-Modus
 - Kommunikationsstatus INIT / ON / FAIL und Anfrage-Statistik
 - Laufzeitänderungen werden in die Add-on-Konfiguration zurückgeschrieben

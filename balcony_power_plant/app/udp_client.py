@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -38,6 +39,7 @@ from marstek_api import ParseError, parse_datagram
 _LOG = get_logger("udp")
 
 ID_MODULO = 1000  # ids 0..999
+MAX_HOLD = 30.0   # s, queries are held back at most this long while regulating
 
 Handler = Callable[[dict[str, Any], bool], Awaitable[None]]
 
@@ -97,6 +99,8 @@ class Pending:
     sent_at: float = 0.0
     sends: int = 0
     answers: int = 0
+    priority: bool = False
+    coalesce: str | None = None
     timer: asyncio.TimerHandle | None = field(default=None, repr=False)
 
 
@@ -128,7 +132,12 @@ class UdpClient:
         self._on_alive, self._on_watchdog, self._on_stats = on_alive, on_watchdog, on_stats
         self._next_id = 0
         self._history: dict[int, Pending] = {}
-        self._queue: asyncio.Queue[Pending] = asyncio.Queue()
+        # two queues: control commands (priority) overtake queries (normal)
+        self._prio: deque[Pending] = deque()
+        self._normal: deque[Pending] = deque()
+        self._wakeup = asyncio.Event()
+        self.hold_queries: Callable[[], bool] = lambda: False
+        self._held_since: float | None = None
         self._transport: asyncio.DatagramTransport | None = None
         self._worker: asyncio.Task | None = None
 
@@ -161,8 +170,8 @@ class UdpClient:
         _LOG.info("Communication settings applied: %s", settings.describe())
         if not settings.queue_enabled:
             # flush anything waiting in the queue straight out
-            while not self._queue.empty():
-                self._fire(self._queue.get_nowait())
+            while self._prio or self._normal:
+                self._fire((self._prio or self._normal).popleft())
             self._update_counts()
 
     # --------------------------------------------------------------- requests
@@ -176,8 +185,15 @@ class UdpClient:
         method: str,
         params_factory: Callable[[int], dict[str, Any]],
         handler: Handler | None = None,
+        priority: bool = False,
+        coalesce: str | None = None,
     ) -> asyncio.Future:
-        """Queue (or fire) one request. Returns a future with the result dict."""
+        """Queue (or fire) one request. Returns a future with the result dict.
+
+        priority : sent before all queued queries (control commands)
+        coalesce : a still queued request with the same key is dropped (only the
+                   newest one is sent, e.g. load-following setpoints)
+        """
         rid = self.next_id()
         msg = {"id": rid, "method": method, "params": params_factory(rid)}
         payload = json.dumps(msg, separators=(",", ":")).encode()
@@ -187,11 +203,20 @@ class UdpClient:
         old = self._history.get(rid)
         if old and old.timer:
             old.timer.cancel()
-        p = Pending(rid, method, payload, handler, fut)
+        p = Pending(rid, method, payload, handler, fut, priority=priority, coalesce=coalesce)
         self._history[rid] = p
         if self.settings.queue_enabled:
-            self._queue.put_nowait(p)
-            _LOG.debug("Queued   #%03d %s (queue length %d)", rid, method, self._queue.qsize())
+            if coalesce:
+                for q in (self._prio, self._normal):
+                    for old_p in [x for x in q if x.coalesce == coalesce]:
+                        q.remove(old_p)
+                        old_p.future.cancel()
+                        _LOG.debug("Replaced #%03d %s by #%03d (not sent)",
+                                   old_p.req_id, old_p.method, rid)
+            (self._prio if priority else self._normal).append(p)
+            self._wakeup.set()
+            _LOG.debug("Queued   #%03d %s%s (queue length %d)", rid, method,
+                       " [priority]" if priority else "", self.queue_length)
         else:
             self._fire(p)
         self._update_counts()
@@ -223,9 +248,39 @@ class UdpClient:
             p.future.set_exception(RequestTimeout(p.method))
             self._update_counts()
 
+    @property
+    def queue_length(self) -> int:
+        return len(self._prio) + len(self._normal)
+
+    async def _next(self) -> Pending:
+        """Next request: priority first; queries wait while hold_queries() is
+        true (load following is regulating), but at most MAX_HOLD seconds."""
+        while True:
+            if self._prio:
+                return self._prio.popleft()
+            if self._normal:
+                now = time.monotonic()
+                if not self.hold_queries():
+                    self._held_since = None
+                    return self._normal.popleft()
+                if self._held_since is None:
+                    self._held_since = now
+                    _LOG.debug("Queries held back while load following settles")
+                if now - self._held_since >= MAX_HOLD:
+                    # hold time exceeded: release queries until the hold condition ends
+                    return self._normal.popleft()
+                self._wakeup.clear()
+                try:
+                    await asyncio.wait_for(self._wakeup.wait(), 0.5)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            self._wakeup.clear()
+            await self._wakeup.wait()
+
     async def _queue_worker(self) -> None:
         while True:
-            p = await self._queue.get()
+            p = await self._next()
             self._update_counts()
             s = self.settings
             if not s.queue_enabled:
@@ -329,7 +384,7 @@ class UdpClient:
 
     # ------------------------------------------------------------------ stats
     def _update_counts(self) -> None:
-        self.stats.queue_length = self._queue.qsize()
+        self.stats.queue_length = self.queue_length
         self.stats.pending = sum(
             1 for p in self._history.values() if p.sends and not p.future.done()
         )

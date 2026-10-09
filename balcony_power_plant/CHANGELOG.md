@@ -3,6 +3,30 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.0] – 2026-10-09
+
+### Added / Neu
+- **Load following** (Lastfolgeregelung): event driven regulation of the battery output
+  via `ES.SetMode` Passive to the grid power from an MQTT topic (e.g. Shelly phase C),
+  no feed-in. New sub-device *BalconyPowerPlant Load following*.
+  / Ereignisgesteuerte Regelung der Batterieausgabe nach der Netzleistung aus einem
+  MQTT-Topic, ohne Einspeisung. Neues Unter-Gerät *BalconyPowerPlant Load following*.
+  - Load reconstruction from the sent setpoint (no overshoot) / Lastrekonstruktion
+  - Asymmetric deadband and averaging (up 12 s / down 5 s), ramp up step, settle time
+  - Setpoint below minimum power -> 0 W; upper limit = *Passive power*
+  - Keep-alive at % of cd_time, sensor timeout, plausibility check (log only)
+  - Diagnostic entities: state, averages, estimated load, setpoints, counters
+- Request queue: priority for control commands, newest setpoint replaces a queued one,
+  queries are held back while regulating (max. 30 s)
+  / Queue: Vorrang für Steuerbefehle, Abfragen werden beim Nachregeln zurückgehalten
+- Simulator: household / grid meter simulation (`--grid-topic`, `--load-steps`, `--dropout-at`)
+
+### Changed / Geändert
+- *Apply mode* while load following is on: Passive only updates the power limit,
+  Auto / AI / UPS switches load following off
+  / *Apply mode* bei aktivem Load following: Passive ändert nur die Grenze,
+  Auto / AI / UPS schaltet Load following ab
+
 ## [0.2.1] – 2026-10-09
 
 ### Added / Neu

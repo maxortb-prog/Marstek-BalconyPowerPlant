@@ -84,6 +84,48 @@ configuration:
   query_es_mode:
     name: "Energiesystem-Modus aktiv"
     description: "ES.GetMode"
+  lf_enabled:
+    name: "Load following (Lastfolgeregelung)"
+    description: "Batterieausgabe nach dem Netzsensor regeln (keine Einspeisung). Auch in HA schaltbar."
+  lf_sensor_topic:
+    name: "Netzsensor-Topic"
+    description: "MQTT-Topic mit der Netzleistung in W (positiv = Bezug, negativ = Einspeisung). Zahl oder JSON."
+  lf_export_reaction:
+    name: "Reaktion auf Einspeisung"
+    description: "Calculated: Sollwert = geschätzte Last - Ziel. Minimum: auf Minimum-Leistung fallen."
+  lf_target_power:
+    name: "Ziel-Netzleistung"
+    description: "W, Regelziel (leichter Bezug)."
+  lf_deadband_upper:
+    name: "Totband oben"
+    description: "W, darüber: hochregeln."
+  lf_deadband_lower:
+    name: "Totband unten"
+    description: "W, darunter: runterregeln."
+  lf_min_power:
+    name: "Minimum-Leistung"
+    description: "W, ein kleinerer Sollwert wird als 0 W gesendet."
+  lf_ramp_step:
+    name: "Rampe hochregeln"
+    description: "W, max. Erhöhung je Schritt."
+  lf_settle_time:
+    name: "Einschwingzeit"
+    description: "s, Wartezeit nach jeder Sollwertänderung."
+  lf_avg_up:
+    name: "Mittelwert hochregeln"
+    description: "s, Mittelwert der Netzleistung fürs Hochregeln."
+  lf_avg_down:
+    name: "Mittelwert runterregeln"
+    description: "s, Mittelwert der Netzleistung fürs Runterregeln."
+  lf_cd_time:
+    name: "Nachlaufzeit cd_time"
+    description: "s, cd_time bei jedem Sollwert."
+  lf_keepalive_pct:
+    name: "Keepalive bei"
+    description: "% der cd_time, nach denen der Sollwert erneut gesendet wird."
+  lf_sensor_timeout:
+    name: "Sensor-Timeout"
+    description: "s ohne Sensorwert -> Minimum-Leistung."
   log_level:
     name: "Log-Level"
     description: "trace, debug, info, warning, error"

@@ -36,6 +36,7 @@ und Home Assistant. Die Kommunikation läuft über die **Marstek Open API Rev 2.
 | `passive_power` | `0` | Leistung im Passive-Modus in W (+ einspeisen, − laden) |
 | `passive_cd_time` | `300` | Nachlaufzeit im Passive-Modus in s |
 | `query_*` | `true` | Welche Abfragen aktiv sind (legt ihre Entities an / entfernt sie) |
+| `lf_*` | – | Load following, see below / siehe unten |
 | `log_level` | `info` | `trace`, `debug`, `info`, `warning`, `error` |
 
 ### Eine einzige Wahrheit (Rückschreiben)
@@ -98,7 +99,8 @@ Area BalconyPowerPlant
    ├─ BalconyPowerPlant Battery        SOC, Temperature, Remaining/Rated capacity, Charging/Discharging allowed (Bat.GetStatus)
    ├─ BalconyPowerPlant PV             PV1–PV4 power, voltage, current, working                           (PV.GetStatus)
    ├─ BalconyPowerPlant Energy system  SOC, Battery capacity, PV/Grid/Off-grid/Battery power, energy counters, Total PV energy (corrected) (ES.GetStatus)
-   └─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
+   ├─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
+   └─ BalconyPowerPlant Load following  Load following, settings, state, diagnostics (ES.SetMode Passive)
 ```
 
 Jedes Abfrage-Gerät enthält zusätzlich **Enable query** (Schalter) und **Request** (Button).
@@ -147,6 +149,94 @@ actions:
 
 Die tatsächlichen Entity-IDs bitte im HA prüfen.
 
+## Load following (Lastfolgeregelung)
+
+Regelt die Batterieausgabe nach der vom Zähler gemessenen Netzleistung (z. B.
+Shelly auf Phase C), sodass Spitzen aus der Batterie abgefedert werden und
+**nichts ins Netz eingespeist** wird. Verwendet `ES.SetMode` Passive mit Leistung
+und `cd_time`.
+
+### Sensor
+
+Die Netzleistung wird **ereignisgesteuert** an das MQTT-Topic `lf_sensor_topic`
+(Standard `Shelly Phase C RAW`) gesendet: reine Zahl in W, positiv = Bezug,
+negativ = Einspeisung (JSON wie `{"power": 123}` geht auch). Beispiel-Automation:
+
+```yaml
+alias: BalconyPowerPlant Shelly Phase C RAW
+triggers:
+  - trigger: state
+    entity_id: sensor.shelly_phase_c
+conditions:
+  - condition: template
+    value_template: "{{ states('sensor.shelly_phase_c') not in ['unknown','unavailable','none',''] }}"
+actions:
+  - action: mqtt.publish
+    data:
+      topic: Shelly Phase C RAW
+      payload: "{{ states('sensor.shelly_phase_c') | float(0) | round(0) }}"
+      qos: 0
+      retain: false
+mode: queued
+```
+
+### Funktionsweise
+
+Der Zähler misst `Netz = Last − Batterieausgabe`. Der Regler rekonstruiert daher
+die Last aus dem gesendeten Sollwert und hält eigene Sollwertänderungen nicht für
+Lastwechsel (keine Überschwinger):
+
+```
+geschätzte Last = Netz (gemittelt) + aktiver Sollwert
+Sollwert        = geschätzte Last − Ziel-Netzleistung       begrenzt auf [0 | Minimum … Grenze]
+```
+
+| Netzleistung (gemittelt) | Aktion |
+|---|---|
+| über **Deadband upper** (15 W) | hochregeln – Mittelwert über *Averaging time regulate up* (12 s), max. *Ramp up step* (100 W) je Schritt |
+| zwischen unten und oben | Ruhe – nur Keepalive |
+| unter **Deadband lower** (0 W) | sofort runterregeln – Mittelwert über *Averaging time regulate down* (5 s) |
+
+- Regelziel ist **Target grid power** (8 W, leichter Bezug).
+- Ein Sollwert unter **Minimum power** (50 W) wird als **0 W** gesendet.
+- **Export reaction**: *Calculated* (Standard) springt direkt auf den berechneten
+  Sollwert, *Minimum* fällt auf die Minimum-Leistung und regelt wieder hoch.
+- Nach jeder Sollwertänderung wartet der Regler die **Settle time** (5 s).
+- **Keepalive**: Muss nichts geändert werden, wird derselbe Sollwert bei
+  **Keepalive at** (50 %) der **Countdown cd_time** (120 s) erneut gesendet.
+- **Obergrenze** = *Passive power* (Gerät Control). Deine SOC-abhängige Automation
+  kann weiter *Passive power* + *Apply mode* setzen: Bei aktivem Load following
+  ändert das nur die Grenze, ans Gerät wird nichts gesendet. Fällt die Grenze unter
+  den aktiven Sollwert, wird sofort reduziert.
+- **Verriegelung**: *Apply mode* mit Auto / AI / UPS schaltet Load following ab.
+  Beim Ausschalten wird einmal 0 W gesendet; danach fällt das Gerät nach Ablauf der
+  `cd_time` zurück.
+- **Sensor timeout** (30 s) ohne Wert → Minimum-Leistung, Zustand `SENSOR_LOST`.
+- Es wird darauf vertraut, dass das Gerät den Sollwert umsetzt (kein Rücklesen).
+  Eine Plausibilitätsprüfung **loggt** nur einen *suspected dropout*, wenn der
+  Netzbezug nach zwei Sollwerterhöhungen nicht sinkt.
+- Regelbefehle haben **Vorrang** in der Queue (nur der neueste wird gesendet).
+  Abfragen (z. B. ES/Bat-Polling aus HA) werden zurückgehalten, solange der Regler
+  einschwingt (max. 30 s).
+
+Deine alte Automation, die Passive zyklisch sendet, bei aktivem Load following deaktivieren.
+
+### Zustände
+
+| Zustand | Bedeutung |
+|---|---|
+| OFF | ausgeschaltet |
+| WAITING | wartet auf Initialisierung / ersten Sensorwert |
+| REGULATING | Sollwert geändert, Einschwingen / Mittelwertbildung |
+| IDLE | Netzleistung im Totband (oder Sollwert 0 W) |
+| LIMITED | mehr Bezug, aber Sollwert an der Grenze |
+| SENSOR_LOST | kein Sensorwert seit *Sensor timeout* |
+
+Diagnose-Entities: Netzleistung (roh / Mittel hoch / Mittel runter), geschätzte
+Last, aktiver und berechneter Sollwert, Leistungsgrenze, letzter Befehl (Grund /
+Zeit), Keepalive-Countdown, Zähler für Sollwertbefehle, Keepalives,
+Einspeise-Ereignisse, vermutete Dropouts und Sensorwerte.
+
 ## MQTT-Topics
 
 | Topic | Inhalt |
@@ -154,6 +244,7 @@ Die tatsächlichen Entity-IDs bitte im HA prüfen.
 | `<base>/availability` | `online` / `offline` |
 | `<base>/state/<abfrage>` | JSON-Ergebnis (`device`, `wifi`, `ble`, `battery`, `pv`, `es_status`, `es_mode`) |
 | `<base>/state/communication` | `INIT` / `ON` / `FAIL` |
+| `<base>/state/load_following` | load following state (JSON) |
 | `<base>/state/stats` | Statistik als JSON |
 | `<base>/control/<name>` | aktueller Wert eines Steuerelements |
 | `<base>/cmd/<name>` | Befehle (`request/<abfrage>`, `request_all`, `apply_mode`, `dod`, `led`, …) |
