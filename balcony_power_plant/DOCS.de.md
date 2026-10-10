@@ -242,7 +242,7 @@ Das Gerät fällt sporadisch aus der Regelung und setzt die Ausgabe auf 0 W
 (beobachtet etwa alle 2 min). Ohne Gegenmaßnahme würde der Regler hochregeln und
 beim Wiederkommen des Geräts in die Einspeisung überschwingen.
 
-**Erkennung** (nur in Ruhe, mindestens Einschwingzeit ohne Sollwertänderung):
+**Erkennung** (mindestens 3 s eingeschwungene Netzwerte nach der letzten Sollwertänderung):
 die Netzleistung springt innerhalb eines Messwerts um etwa den **aktiven
 Sollwert** (verglichen mit dem zeitgewichteten Mittel der 10 s davor).
 Toleranz = **max(Dropout tolerance W, Dropout tolerance percent × Sollwert)**,
@@ -265,6 +265,29 @@ Jeder Dropout wird mit den Sekunden seit dem letzten Befehl / der letzten
 Sollwertänderung geloggt – damit lässt sich klären, ob er mit Keepalive oder
 cd_time zusammenhängt.
 
+### Keepalive-Jitter (Testfunktion)
+
+These: Die geräteeigene Regelung (das Gerät ist selbst auch mit dem Shelly gekoppelt)
+kommt mit einer sehr konstanten Ausgabe nicht zurecht. Mit **Keepalive jitter** wird
+jeder Keepalive zum Test:
+
+1. **Sollwert − Jitter amount %** senden (nur nach unten, Standard 50 %)
+2. *Settle time* warten, dann über *Averaging time regulate up* mitteln
+3. Auswertung: Netz um etwa den Jitter gestiegen → *followed*; weniger als die Hälfte →
+   *NOT followed* (Warnung); deutlich mehr → *inconclusive* (Lastwechsel oder Dropout)
+4. wieder den vorherigen Sollwert senden, *Settle time* warten, normaler Betrieb
+
+Während des Jitters wird nicht hochgeregelt; schneller Einspeiseschutz und
+Dropout-Erkennung bleiben aktiv (ein Dropout im Jitter bricht ihn ab und startet HOLD).
+Auch **am Deckel** (LIMITED, nach unten) und **bei 0 W** (z. B. Akku leer / Deckel 0 W aus
+HA): dann wird die Ausgabe so weit erhöht, dass der Bezug bis aufs Regelziel ausgeglichen wird
+(Netz ≈ 8 W, keine Einspeisung), **max. 100 W**, und danach wieder auf 0 gesetzt – auch wenn
+der Deckel aus HA 0 W ist (unter 10 W Bezug ausgelassen). Keine Einstellung nötig; das Timing
+folgt dem Keepalive (*Keepalive at* % der *Countdown cd_time*). Kein Jitter in HOLD.
+Beispiel: 500 W → 250 W für ~17 s; bei 0 W mit 60 W Bezug → +52 W, mit 300 W Bezug → +100 W.
+Zähler: *Jitter probes / followed / not followed / inconclusive*. Über *Dropout
+interval* sieht man, ob sich der Takt von ~123 s ändert.
+
 ### Zustände
 
 | Zustand | Bedeutung |
@@ -274,6 +297,7 @@ cd_time zusammenhängt.
 | REGULATING | Sollwert geändert, Einschwingen / Mittelwertbildung |
 | IDLE | Netzleistung im Totband (oder Sollwert 0 W) |
 | LIMITED | mehr Bezug, aber Sollwert an der Grenze |
+| JITTER | Keepalive-Jitter-Test läuft |
 | HOLD | Dropout erkannt, Sollwert wird gehalten, Warten auf Wiederkehr |
 | SENSOR_LOST | kein Sensorwert seit *Sensor timeout* |
 

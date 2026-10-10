@@ -141,6 +141,12 @@ configuration:
   lf_dropout_hold:
     name: "Dropout hold time"
     description: "s to wait for recovery, then regulate normally."
+  lf_jitter:
+    name: "Keepalive jitter"
+    description: "Test: each keep-alive lowers the setpoint by Jitter amount %, checks that the device follows, then returns."
+  lf_jitter_pct:
+    name: "Jitter amount"
+    description: "% of the active setpoint (only downwards)."
   log_level:
     name: "Log level"
     description: "trace, debug, info, warning, error"

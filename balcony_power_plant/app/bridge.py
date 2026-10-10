@@ -23,8 +23,8 @@ from typing import Any
 import aiomqtt
 
 from config import OptionsStore
-from load_following import (EXPORT_REACTIONS, NUMBERS as LF_NUMBERS, STATES as LF_STATES,
-                             SWITCHES as LF_SWITCHES, LoadFollower)
+from load_following import (EXPORT_REACTIONS, NUMBERS as LF_NUMBERS, OBSOLETE_ENTITIES,
+                             STATES as LF_STATES, SWITCHES as LF_SWITCHES, LoadFollower)
 from logger import get_logger, set_level
 from marstek_api import (
     MODES,
@@ -423,6 +423,10 @@ class Bridge:
             ("dropouts", "Dropouts detected", "mdi:power-plug-off"),
             ("dropout_recoveries", "Dropout recoveries", "mdi:power-plug"),
             ("dropout_timeouts", "Dropout hold timeouts", "mdi:timer-off-outline"),
+            ("jitter_probes", "Jitter probes", "mdi:sine-wave"),
+            ("jitter_followed", "Jitter followed", "mdi:check-circle-outline"),
+            ("jitter_not_followed", "Jitter not followed", "mdi:close-circle-outline"),
+            ("jitter_inconclusive", "Jitter inconclusive", "mdi:help-circle-outline"),
         ):
             add("sensor", f"lf_{key}", name, stat_t=st,
                 val_tpl=f"{{{{ value_json.{key} }}}}", stat_cla="total_increasing",
@@ -436,6 +440,8 @@ class Bridge:
             count += 1
         for q in QUERIES.values():
             count += await self.publish_query_discovery(q)
+        for component, key in OBSOLETE_ENTITIES:      # entities of older versions
+            await self._publish_discovery(component, key, None)
         _LOG.info("MQTT discovery published (%d entities)%s", count,
                   "" if self.initialized else " - query devices follow after initialization")
 

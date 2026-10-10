@@ -3,6 +3,36 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.6] – 2026-10-10
+
+### Changed / Geändert
+- Jitter at 0 W: fixed rule instead of a setting – the import is compensated down to the
+  target (no export), max. 100 W. Number *Jitter amount at 0 W* removed (also from HA).
+  / Jitter bei 0 W: Bezug wird bis aufs Regelziel ausgeglichen, max. 100 W; Slider entfernt.
+- Options write-back sends only options known to this version.
+
+## [0.3.5] – 2026-10-10
+
+### Added / Neu
+- Keepalive jitter also at **0 W** (upwards by *Jitter amount at 0 W*, default 50 W, limited
+  to import − target, also when the limit from HA is 0 W) and **at the limit** (LIMITED,
+  downwards) – the output is constant there as well.
+  / Jitter auch bei 0 W (nach oben, begrenzt auf Bezug − Ziel) und am Deckel (nach unten)
+
+## [0.3.4] – 2026-10-10
+
+### Added / Neu
+- **Keepalive jitter** (test function, default off): every keep-alive lowers the setpoint
+  by *Jitter amount* % (default 50 %), checks via the grid sensor whether the device follows
+  (followed / not followed / inconclusive) and returns to the previous setpoint. New state
+  JITTER, switch *Keepalive jitter*, number *Jitter amount*, four counters.
+  / Jeder Keepalive senkt den Sollwert um x %, prüft ob das Gerät folgt, und kehrt zurück.
+
+### Changed / Geändert
+- Dropout detection works from 3 s of settled values after any setpoint change (before:
+  only when idle for 10 s), also during the jitter (a dropout aborts the jitter -> HOLD)
+  / Dropout-Erkennung schon 3 s nach dem Einschwingen, auch während des Jitters
+
 ## [0.3.3] – 2026-10-10
 
 ### Changed / Geändert

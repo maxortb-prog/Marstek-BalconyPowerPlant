@@ -54,7 +54,8 @@ IDLE = "IDLE"                  # grid inside deadband
 LIMITED = "LIMITED"            # import above deadband but setpoint = upper limit
 SENSOR_LOST = "SENSOR_LOST"
 HOLD = "HOLD"                  # device dropout suspected: hold setpoint, wait for recovery
-STATES = [OFF, WAITING, REGULATING, IDLE, LIMITED, HOLD, SENSOR_LOST]
+JITTER = "JITTER"              # keep-alive jitter test running
+STATES = [OFF, WAITING, REGULATING, IDLE, LIMITED, HOLD, JITTER, SENSOR_LOST]
 
 EXPORT_CALCULATED = "Calculated"
 EXPORT_MINIMUM = "Minimum"
@@ -62,6 +63,9 @@ EXPORT_REACTIONS = [EXPORT_CALCULATED, EXPORT_MINIMUM]
 
 DROPOUT_UNDERSHOOT = 15  # W, the jump may be this much more BELOW the setpoint (device
                          # does not go exactly to 0 W - observed jump = setpoint - 10..15 W)
+DROPOUT_MIN_REF = 3.0    # s of settled grid values needed as reference before a jump
+JITTER_ZERO_MAX = 100    # W, jitter at 0 W: compensate the import (minus target), max. 100 W
+OBSOLETE_ENTITIES = [("number", "lf_jitter_zero_w")]   # removed from HA on discovery
 CANDIDATE_TIME = 6.0     # s to confirm a partial jump as dropout (output ramping down)
 REFERENCE_RETRY = 10     # s between reference reads (ES.GetStatus) at takeover
 TICK = 1.0                 # s, timer for timeouts / keep-alive
@@ -87,12 +91,14 @@ NUMBERS: dict[str, tuple[str, float, float, float, str | None, float]] = {
     "lf_dropout_tolerance":     ("Dropout tolerance", 0, 200, 1, "W", 15),
     "lf_dropout_tolerance_pct": ("Dropout tolerance percent", 0, 50, 1, "%", 10),
     "lf_dropout_hold":          ("Dropout hold time", 5, 120, 1, "s", 30),
+    "lf_jitter_pct":            ("Jitter amount", 5, 90, 5, "%", 50),
 }
 
 # option key -> (HA name, default)
 SWITCHES: dict[str, tuple[str, bool]] = {
     "lf_dropout_detect": ("Dropout detection", True),
     "lf_dropout_resend": ("Dropout resend setpoint", True),
+    "lf_jitter": ("Keepalive jitter", False),
 }
 
 
@@ -114,7 +120,10 @@ class LoadFollower:
         self.in_export = False
         self.counters = {"commands": 0, "keepalives": 0, "export_events": 0,
                          "suspected_dropouts": 0, "sensor_values": 0, "invalid_values": 0,
-                         "dropouts": 0, "dropout_recoveries": 0, "dropout_timeouts": 0}
+                         "dropouts": 0, "dropout_recoveries": 0, "dropout_timeouts": 0,
+                         "jitter_probes": 0, "jitter_followed": 0, "jitter_not_followed": 0,
+                         "jitter_inconclusive": 0}
+        self.jitter: dict[str, Any] | None = None    # running keep-alive jitter test
         # dropout hold
         self.hold_start: float | None = None
         self.hold_level: float | None = None    # grid level before the jump
@@ -200,6 +209,7 @@ class LoadFollower:
         self._ref_next_try = 0.0
         self._check, self._strikes = None, 0
         self.hold_start = self.hold_level = None
+        self.jitter = None
         self.state = WAITING if self.enabled else OFF
         self._dirty = True
 
@@ -374,9 +384,15 @@ class LoadFollower:
 
         # --- upper limit lowered (Passive power from HA) ------------------
         cap = self.cap
-        if self.setpoint > cap:
+        if self.jitter is not None and self.jitter["base"] > cap:
+            self.jitter = None                    # limit lowered: no return to the old base
+        jitter_up = self.jitter is not None and self.jitter["dir"] > 0
+        if self.setpoint > cap and not jitter_up:
             self._send(cap, f"limit {cap} W", change=True)
             self._set_state(REGULATING)
+            return
+
+        if self.jitter is not None and self._jitter_step(now):
             return
 
         settle_end = self.last_change + self.o("lf_settle_time")
@@ -446,6 +462,86 @@ class LoadFollower:
         self._set_state(IDLE if self.avg_up is not None else REGULATING)
         self._keepalive(now)
 
+    # ---------------------------------------------------- keep-alive jitter
+    def _start_jitter(self, now: float) -> None:
+        """Keep-alive as a probe. Setpoint > 0 (also at the limit): lower it by
+        lf_jitter_pct %. Setpoint 0 W: raise it so the import is compensated down to the
+        target (no export), max. JITTER_ZERO_MAX W, even if the limit is 0.
+        Then check that the device follows and return to the previous setpoint."""
+        base = int(self.setpoint or 0)
+        before = self._integrate(now - self.o("lf_avg_up"), now)
+        if before is None:
+            before = self.samples[-1][1]
+        if base > 0:
+            direction = -1
+            amount = int(round(base * self.o("lf_jitter_pct") / 100.0))
+        else:
+            direction = 1
+            room = before - self.o("lf_target_power")
+            amount = int(min(JITTER_ZERO_MAX, max(0.0, room)))
+            if amount < 10:
+                _LOG.debug("Jitter at 0 W skipped - import %.0f W too small", before)
+                amount = 0
+        if amount <= 0:
+            self._send(base, "keepalive", change=False)
+            return
+        self.jitter = {"phase": "down", "dir": direction, "base": base, "amount": amount,
+                       "before": before, "t": now}
+        self.counters["jitter_probes"] += 1
+        self._set_state(JITTER)
+        sign = "+" if direction > 0 else "-"
+        self._send(base + direction * amount, f"jitter {sign}{amount} W", change=True,
+                   count=False)
+
+    def _jitter_step(self, now: float) -> bool:
+        """Advance the running jitter test. Returns True while it is running."""
+        j = self.jitter
+        assert j is not None
+        settle, avg = self.o("lf_settle_time"), self.o("lf_avg_up")
+        # export protection stays active (fast average)
+        avg_down = self._integrate(now - self.o("lf_avg_down"), now)
+        if (j["phase"] == "down" and now >= j["t"] + settle and avg_down is not None
+                and avg_down < self.o("lf_deadband_lower")):
+            _LOG.warning("Export during jitter (%+.0f W) - jitter aborted", avg_down)
+            self.jitter = None
+            return False
+        if j["phase"] == "down":
+            if now >= j["t"] + settle and self._detect_dropout(now, j["t"] + settle):
+                _LOG.info("Jitter aborted - dropout during jitter")
+                self.counters["jitter_inconclusive"] += 1
+                self.jitter = None
+                return True
+            if now < j["t"] + settle + avg:
+                self._set_state(JITTER)
+                return True
+            measured = self._integrate(j["t"] + settle, now)
+            # expected grid change: +amount (output lowered) or -amount (output raised)
+            rise = ((measured or 0.0) - j["before"]) * (-j["dir"])
+            amt = j["amount"]
+            if rise < 0.5 * amt:
+                result, key = "NOT followed", "jitter_not_followed"
+            elif rise <= 1.5 * amt + 15:
+                result, key = "followed", "jitter_followed"
+            else:
+                result, key = "inconclusive (load change or dropout)", "jitter_inconclusive"
+            self.counters[key] += 1
+            log = _LOG.warning if key == "jitter_not_followed" else _LOG.info
+            log("Jitter %s%d W: grid %+.0f -> %+.0f W (expected change %+d W, seen %+.0f W)"
+                " - device %s", "+" if j["dir"] > 0 else "-", amt, j["before"],
+                measured or 0.0, -j["dir"] * amt, (measured or 0.0) - j["before"], result)
+            j["phase"], j["t"] = "return", now
+            self._send(j["base"], "jitter return", change=True, count=False)
+            self._set_state(JITTER)
+            return True
+        # phase "return": wait for the settle time, then normal operation
+        if now < j["t"] + settle:
+            self._set_state(JITTER)
+            return True
+        self.jitter = None
+        self.last_change = now - settle          # averaging windows restart now
+        self._set_state(REGULATING)
+        return True
+
     # ------------------------------------------------------- dropout hold
     def sw(self, key: str) -> bool:
         return bool(self.opts.get(key, SWITCHES[key][1]))
@@ -457,15 +553,17 @@ class LoadFollower:
     def _detect_dropout(self, now: float, settle_end: float) -> bool:
         """Device fell out of regulation: the grid power jumps up by about the
         active setpoint while nothing was commanded. Returns True if HOLD starts."""
-        if not self.sw("lf_dropout_detect") or self.state not in (IDLE, LIMITED, HOLD):
+        if not self.sw("lf_dropout_detect") or self.hold_start is not None:
             return False
         sp = self.setpoint or 0
         tol = self._tolerance()
         if sp <= tol or len(self.samples) < 2:
             return False
         t_last, latest = self.samples[-1]
-        before_start = t_last - 10.0
-        if before_start < settle_end:
+        # reference level: up to 10 s before the last sample, but only after settling;
+        # at least DROPOUT_MIN_REF s are needed
+        before_start = max(t_last - 10.0, settle_end)
+        if t_last - before_start < DROPOUT_MIN_REF:
             return False
         before = self._integrate(before_start, t_last)
         if self._candidate_until is not None and self._candidate_level is not None:
@@ -477,7 +575,7 @@ class LoadFollower:
         if not low <= jump <= high:
             # partial jump towards the setpoint (output still ramping down):
             # wait up to CANDIDATE_TIME for confirmation before regulating up
-            if 0.3 * sp <= jump < low and self.state != HOLD:
+            if 0.3 * sp <= jump < low:
                 if self._candidate_until is None:
                     self._candidate_until = now + CANDIDATE_TIME
                     self._candidate_level = before
@@ -554,6 +652,10 @@ class LoadFollower:
         interval = self.o("lf_cd_time") * self.o("lf_keepalive_pct") / 100.0
         if now - self.last_send >= interval:
             self.counters["keepalives"] += 1
+            if (self.sw("lf_jitter") and self.state in (IDLE, LIMITED)
+                    and self.hold_start is None and self.jitter is None):
+                self._start_jitter(now)
+                return
             self._send(self.setpoint, "keepalive", change=False)
 
     def keepalive_in(self) -> float | None:
@@ -562,7 +664,7 @@ class LoadFollower:
         interval = self.o("lf_cd_time") * self.o("lf_keepalive_pct") / 100.0
         return max(0.0, round(interval - (time.monotonic() - self.last_send), 1))
 
-    def _send(self, power: int, reason: str, change: bool) -> None:
+    def _send(self, power: int, reason: str, change: bool, count: bool = True) -> None:
         cd_time = int(self.o("lf_cd_time"))
         now = time.monotonic()
         old = self.setpoint
@@ -570,7 +672,8 @@ class LoadFollower:
         self.last_send = now
         if change:
             self.last_change = now
-            self.counters["commands"] += 1
+            if count:
+                self.counters["commands"] += 1
         self.last_reason = reason
         self.last_cmd_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self._dirty = True
@@ -644,6 +747,7 @@ class LoadFollower:
             "hold_for": None if self.hold_start is None else round(time.monotonic() - self.hold_start),
             "last_dropout_duration": self.last_dropout_s,
             "dropout_interval": self.dropout_interval,
+            "jitter_phase": None if self.jitter is None else self.jitter["phase"],
             "last_reason": self.last_reason,
             "last_command": self.last_cmd_ts,
             "keepalive_in": self.keepalive_in(),

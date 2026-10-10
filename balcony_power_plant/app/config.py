@@ -76,6 +76,8 @@ DEFAULTS: dict[str, Any] = {
     "lf_dropout_tolerance": 15,
     "lf_dropout_tolerance_pct": 10,
     "lf_dropout_hold": 30,
+    "lf_jitter": False,
+    "lf_jitter_pct": 50,
     "log_level": "info",
 }
 
@@ -138,7 +140,9 @@ class OptionsStore:
             await asyncio.to_thread(self._write_local)
 
     def _post_supervisor(self) -> None:
-        body = json.dumps({"options": self.data}).encode()
+        # only options known to this version (the Supervisor rejects unknown keys)
+        known = {k: v for k, v in self.data.items() if k in DEFAULTS}
+        body = json.dumps({"options": known}).encode()
         req = urllib.request.Request(
             SUPERVISOR_URL,
             data=body,

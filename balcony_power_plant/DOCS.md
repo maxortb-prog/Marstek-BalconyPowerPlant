@@ -240,7 +240,7 @@ The device sporadically falls out of regulation and drops its output to 0 W
 (observed about every 2 min). Without countermeasure the regulator would chase
 this (regulate up) and overshoot into export when the device comes back.
 
-**Detection** (only when idle, no setpoint change for at least the settle time):
+**Detection** (at least 3 s of settled grid values after the last setpoint change):
 the grid power jumps up by about the **active setpoint** within one sample
 (compared with the time weighted average of the 10 s before).
 Tolerance = **max(Dropout tolerance W, Dropout tolerance percent × setpoint)**,
@@ -262,6 +262,29 @@ device). Answers slower than 500 ms are logged as INFO and counted (*Slow respon
 Every dropout is logged with the seconds since the last command / setpoint
 change – useful to find out whether it is linked to keep-alive or cd_time.
 
+### Keepalive jitter (test function)
+
+Hypothesis: the device's own regulation (it is also coupled to the Shelly) might
+misbehave when the output is very constant. With **Keepalive jitter** on, every
+keep-alive becomes a probe:
+
+1. send **setpoint − Jitter amount %** (only downwards, default 50 %)
+2. wait *Settle time*, then average over *Averaging time regulate up*
+3. evaluate: grid rose by about the jitter → *followed*; less than half → *NOT followed*
+   (warning); much more → *inconclusive* (load change or dropout)
+4. send the previous setpoint again, wait *Settle time*, normal operation
+
+During the jitter nothing is regulated up; the fast export protection and the dropout
+detection stay active (a dropout during the jitter aborts it and starts HOLD).
+Also **at the limit** (LIMITED, downwards) and **at 0 W** (e.g. battery empty / limit 0 W
+from HA): then the output is raised so that the import is compensated down to the target
+(grid ≈ 8 W, no export), **max. 100 W**, and set back to 0 – also when the limit from HA is
+0 W (skipped below 10 W import). No settings needed; the timing follows the keep-alive
+(*Keepalive at* % of *Countdown cd_time*). No jitter in HOLD.
+Example: 500 W → 250 W for ~17 s; at 0 W with 60 W import → +52 W, with 300 W import → +100 W.
+Counters: *Jitter probes / followed / not followed / inconclusive*. Watch
+*Dropout interval* to see whether the ~123 s cycle changes.
+
 ### States
 
 | State | Meaning |
@@ -271,6 +294,7 @@ change – useful to find out whether it is linked to keep-alive or cd_time.
 | REGULATING | setpoint changed, settling / averaging |
 | IDLE | grid power inside the deadband (or setpoint 0 W) |
 | LIMITED | more import, but the setpoint is at the limit |
+| JITTER | keep-alive jitter test running |
 | HOLD | dropout detected, holding the setpoint and waiting for recovery |
 | SENSOR_LOST | no sensor value for *Sensor timeout* |
 

@@ -141,6 +141,12 @@ configuration:
   lf_dropout_hold:
     name: "Dropout-Haltezeit"
     description: "s Wartezeit auf Wiederkehr, danach normale Regelung."
+  lf_jitter:
+    name: "Keepalive-Jitter"
+    description: "Test: Jeder Keepalive senkt den Sollwert um Jitter amount %, prüft ob das Gerät folgt, und kehrt zurück."
+  lf_jitter_pct:
+    name: "Jitter-Betrag"
+    description: "% vom aktiven Sollwert (nur nach unten)."
   log_level:
     name: "Log-Level"
     description: "trace, debug, info, warning, error"
