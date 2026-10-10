@@ -3,6 +3,21 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.3] – 2026-10-10
+
+### Changed / Geändert
+- Dropout detection: asymmetric band – the jump may be up to tolerance + 15 W below the
+  setpoint (device does not drop exactly to 0 W; a dropout at 152 W with a +136 W jump
+  was missed in 0.3.2) / Asymmetrisches Erkennungsband (Sprung bis Toleranz + 15 W unter
+  dem Sollwert)
+
+### Added / Neu
+- Sensor *Dropout interval* (time between the last two dropouts) and interval in the log
+  / Abstand zwischen zwei Dropouts
+- Answers slower than 500 ms are logged as INFO, sensor *Slow responses*
+  / Langsame Antworten (> 500 ms) werden geloggt und gezählt
+- Simulator: `--dropout-residual`
+
 ## [0.3.2] – 2026-10-10
 
 ### Added / Neu

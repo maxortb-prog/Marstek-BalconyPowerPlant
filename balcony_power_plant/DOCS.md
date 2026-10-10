@@ -244,7 +244,9 @@ this (regulate up) and overshoot into export when the device comes back.
 the grid power jumps up by about the **active setpoint** within one sample
 (compared with the time weighted average of the 10 s before).
 Tolerance = **max(Dropout tolerance W, Dropout tolerance percent × setpoint)**,
-default max(15 W, 10 %) → ±15 W at 40 W, ±50 W at 500 W. A partial jump (output
+default max(15 W, 10 %) → ±15 W at 40 W, ±50 W at 500 W. The band is asymmetric:
+the jump may be up to **tolerance + 15 W below** the setpoint, because the device does
+not go exactly to 0 W (observed: jump = setpoint − 10…15 W). A partial jump (output
 still ramping down) is confirmed within up to 3 s before regulating up.
 
 **HOLD**: no regulating up; the setpoint is re-sent immediately (*Dropout resend
@@ -252,6 +254,10 @@ setpoint*), keep-alive continues.
 - grid returns to the level before the jump → *recovered*, averaging restarts
 - *Dropout hold time* (30 s) without recovery → real load change, normal regulation
 - export during HOLD → leave HOLD and regulate down immediately
+
+The sensor **Dropout interval** shows the time between the last two dropouts
+(observed: very stable ~123 s, independent of our commands → internal cycle of the
+device). Answers slower than 500 ms are logged as INFO and counted (*Slow responses*).
 
 Every dropout is logged with the seconds since the last command / setpoint
 change – useful to find out whether it is linked to keep-alive or cd_time.

@@ -60,6 +60,8 @@ EXPORT_CALCULATED = "Calculated"
 EXPORT_MINIMUM = "Minimum"
 EXPORT_REACTIONS = [EXPORT_CALCULATED, EXPORT_MINIMUM]
 
+DROPOUT_UNDERSHOOT = 15  # W, the jump may be this much more BELOW the setpoint (device
+                         # does not go exactly to 0 W - observed jump = setpoint - 10..15 W)
 CANDIDATE_TIME = 6.0     # s to confirm a partial jump as dropout (output ramping down)
 REFERENCE_RETRY = 10     # s between reference reads (ES.GetStatus) at takeover
 TICK = 1.0                 # s, timer for timeouts / keep-alive
@@ -118,6 +120,8 @@ class LoadFollower:
         self.hold_level: float | None = None    # grid level before the jump
         self.last_dropout_s: float | None = None
         self._candidate_until: float | None = None
+        self._last_dropout_at: float | None = None
+        self.dropout_interval: int | None = None
         self._candidate_level: float | None = None
         self._check: dict[str, Any] | None = None     # pending plausibility check
         self._strikes = 0
@@ -469,10 +473,11 @@ class LoadFollower:
         if before is None:
             return False
         jump = latest - before
-        if abs(jump - sp) > tol:
+        low, high = sp - tol - DROPOUT_UNDERSHOOT, sp + tol      # asymmetric band
+        if not low <= jump <= high:
             # partial jump towards the setpoint (output still ramping down):
             # wait up to CANDIDATE_TIME for confirmation before regulating up
-            if 0.3 * sp <= jump < sp - tol and self.state != HOLD:
+            if 0.3 * sp <= jump < low and self.state != HOLD:
                 if self._candidate_until is None:
                     self._candidate_until = now + CANDIDATE_TIME
                     self._candidate_level = before
@@ -484,10 +489,15 @@ class LoadFollower:
         self._candidate_until = None
         self.hold_start, self.hold_level = now, before
         self.counters["dropouts"] += 1
+        interval = None if self._last_dropout_at is None else now - self._last_dropout_at
+        self._last_dropout_at = now
+        self.dropout_interval = None if interval is None else round(interval)
         _LOG.warning(
-            "Dropout detected: grid %+.0f -> %+.0f W (jump %+.0f W ~ setpoint %d W, tol %.0f W)"
-            " - %.0f s after last command, %.0f s after last setpoint change - HOLD",
-            before, latest, jump, sp, tol, now - self.last_send, now - self.last_change)
+            "Dropout detected: grid %+.0f -> %+.0f W (jump %+.0f W, setpoint %d W, band %.0f..%.0f W)"
+            " - %.0f s after last command, %.0f s after last setpoint change, %s since last dropout"
+            " - HOLD",
+            before, latest, jump, sp, low, high, now - self.last_send, now - self.last_change,
+            "-" if interval is None else f"{interval:.0f} s")
         self._set_state(HOLD)
         self._dirty = True
         if self.sw("lf_dropout_resend"):
@@ -633,6 +643,7 @@ class LoadFollower:
             "reference": None if self.reference is None else round(self.reference),
             "hold_for": None if self.hold_start is None else round(time.monotonic() - self.hold_start),
             "last_dropout_duration": self.last_dropout_s,
+            "dropout_interval": self.dropout_interval,
             "last_reason": self.last_reason,
             "last_command": self.last_cmd_ts,
             "keepalive_in": self.keepalive_in(),

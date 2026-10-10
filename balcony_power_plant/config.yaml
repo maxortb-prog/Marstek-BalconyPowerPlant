@@ -1,5 +1,5 @@
 name: BalconyPowerPlant
-version: "0.3.2"
+version: "0.3.3"
 slug: balcony_power_plant
 description: >-
   Local UDP bridge between a Marstek Venus battery (Open API Rev 2.0)

@@ -39,6 +39,7 @@ from marstek_api import ParseError, parse_datagram
 _LOG = get_logger("udp")
 
 ID_MODULO = 1000  # ids 0..999
+SLOW_RTT_MS = 500 # answers slower than this are logged as INFO (device busy?)
 MAX_HOLD = 30.0   # s, queries are held back at most this long while regulating
 
 Handler = Callable[[dict[str, Any], bool], Awaitable[None]]
@@ -80,6 +81,7 @@ class Stats:
     duplicates: int = 0
     errors: int = 0
     parse_repairs: int = 0
+    slow_responses: int = 0
     last_rtt_ms: float | None = None
     last_response: str | None = None
     queue_length: int = 0
@@ -340,6 +342,10 @@ class UdpClient:
         rtt = (time.monotonic() - p.sent_at) * 1000.0
         self.stats.last_rtt_ms = round(rtt, 1)
         self._on_alive()
+
+        if rtt > SLOW_RTT_MS and p.answers == 1:
+            self.stats.slow_responses += 1
+            _LOG.info("Slow     #%03d %s answered in %.0f ms (normally < 100 ms)", rid, p.method, rtt)
 
         if p.answers > 1:
             self.stats.duplicates += 1

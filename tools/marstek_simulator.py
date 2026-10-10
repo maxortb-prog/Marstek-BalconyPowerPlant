@@ -23,6 +23,7 @@ Household / grid meter simulation for load following (Lastfolgeregelung):
     --tau 1.5        s, time constant of the inverter output
     --dropout-at 90  s, device stops feeding in ...
     --dropout-for 40 s, ... for this long (0 = until the next setpoint change)
+    --dropout-residual 12  W the device still delivers during a dropout (not exactly 0)
     --dropout-every 120  repeat the dropout every N s (needs --dropout-at and --dropout-for)
     --auto-output 250   W the device feeds in while in Auto mode (e.g. after boot)
     --hang-after 6 --hang-for 40   stop answering after 6 answers for 40 s (init test)
@@ -52,13 +53,14 @@ class VenusA:
         self.dropout_until = 0.0   # >0: dropout ends at this sim time
 
     auto_output = 0.0
+    dropout_residual = 0.0
 
     def target_output(self) -> float:
         if self.mode == "Passive" and time.time() > self.passive_until:
             self.mode = "Auto"                 # cd_time expired -> back to Auto
             print("   cd_time expired -> Auto", flush=True)
         if self.dropped:
-            return 0.0
+            return float(self.dropout_residual)
         if self.mode != "Passive":
             return float(self.auto_output)
         return float(max(0, self.passive_power))
@@ -131,6 +133,7 @@ class Proto(asyncio.DatagramProtocol):
         self.dev = VenusA()
         self.lock = asyncio.Lock()
         self.dev.auto_output = args.auto_output
+        self.dev.dropout_residual = args.dropout_residual
         self.answered = 0
         self.hang_until = 0.0
         self.hang_done = False
@@ -248,6 +251,7 @@ async def main() -> None:
     ap.add_argument("--dropout-for", type=float, default=0.0)
     ap.add_argument("--auto-output", type=float, default=0.0)
     ap.add_argument("--dropout-every", type=float, default=0.0)
+    ap.add_argument("--dropout-residual", type=float, default=0.0)
     ap.add_argument("--hang-after", type=int, default=0)
     ap.add_argument("--hang-for", type=float, default=40.0)
     args = ap.parse_args()

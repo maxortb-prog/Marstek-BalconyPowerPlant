@@ -246,7 +246,9 @@ beim Wiederkommen des Geräts in die Einspeisung überschwingen.
 die Netzleistung springt innerhalb eines Messwerts um etwa den **aktiven
 Sollwert** (verglichen mit dem zeitgewichteten Mittel der 10 s davor).
 Toleranz = **max(Dropout tolerance W, Dropout tolerance percent × Sollwert)**,
-Standard max(15 W, 10 %) → ±15 W bei 40 W, ±50 W bei 500 W. Ein Teilsprung
+Standard max(15 W, 10 %) → ±15 W bei 40 W, ±50 W bei 500 W. Das Band ist
+asymmetrisch: Der Sprung darf bis zu **Toleranz + 15 W unter** dem Sollwert liegen,
+weil das Gerät nicht exakt auf 0 W geht (beobachtet: Sprung = Sollwert − 10…15 W). Ein Teilsprung
 (Ausgabe fällt noch ab) wird bis zu 3 s bestätigt, bevor hochgeregelt wird.
 
 **HOLD**: kein Hochregeln; der Sollwert wird sofort erneut gesendet (*Dropout
@@ -254,6 +256,10 @@ resend setpoint*), Keepalive läuft weiter.
 - Netz kehrt auf das Niveau vor dem Sprung zurück → *recovered*, Mittelwerte starten neu
 - *Dropout hold time* (30 s) ohne Wiederkehr → echter Lastwechsel, normale Regelung
 - Einspeisung während HOLD → HOLD verlassen, sofort runterregeln
+
+Der Sensor **Dropout interval** zeigt den Abstand der letzten beiden Dropouts
+(beobachtet: sehr stabil ~123 s, unabhängig von unseren Befehlen → interner Zyklus des
+Geräts). Antworten über 500 ms werden als INFO geloggt und gezählt (*Slow responses*).
 
 Jeder Dropout wird mit den Sekunden seit dem letzten Befehl / der letzten
 Sollwertänderung geloggt – damit lässt sich klären, ob er mit Keepalive oder

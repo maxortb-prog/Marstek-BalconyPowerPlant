@@ -335,6 +335,7 @@ class Bridge:
             ("duplicates", "Duplicate responses", None, "mdi:content-duplicate"),
             ("errors", "Device errors", None, "mdi:alert-circle"),
             ("parse_repairs", "Repaired responses", None, "mdi:wrench"),
+            ("slow_responses", "Slow responses", None, "mdi:snail"),
             ("queue_length", "Queue length", None, "mdi:tray-full"),
             ("pending", "Pending requests", None, "mdi:timer-sand"),
             ("last_rtt_ms", "Round-trip time", "ms", "mdi:timer-outline"),
@@ -406,6 +407,9 @@ class Bridge:
         add("sensor", "lf_last_dropout_duration", "Last dropout duration", stat_t=st,
             val_tpl="{{ value_json.last_dropout_duration }}", unit_of_meas="s",
             ic="mdi:timer-sand-complete")
+        add("sensor", "lf_dropout_interval", "Dropout interval", stat_t=st,
+            val_tpl="{{ value_json.dropout_interval }}", unit_of_meas="s",
+            stat_cla="measurement", ic="mdi:timer-sync-outline")
         add("sensor", "lf_keepalive_in", "Keepalive in", stat_t=st,
             val_tpl="{{ value_json.keepalive_in }}", unit_of_meas="s",
             ic="mdi:timer-refresh-outline")
