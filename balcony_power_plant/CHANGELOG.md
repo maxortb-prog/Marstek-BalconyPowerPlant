@@ -3,6 +3,25 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.2] – 2026-10-10
+
+### Added / Neu
+- Load following **Dropout hold**: detects the device dropping its output to 0 W
+  (grid jumps by ~setpoint, tolerance max(15 W, 10 %)), re-sends the setpoint immediately
+  and holds instead of regulating up; recovery / hold timeout (30 s) / export handling.
+  New state HOLD, switches *Dropout detection*, *Dropout resend setpoint*, numbers
+  *Dropout tolerance*, *Dropout tolerance percent*, *Dropout hold time*, diagnostics
+  (dropouts, recoveries, timeouts, last dropout duration, hold elapsed).
+  / Erkennt Aussetzer des Geräts, sendet den Sollwert sofort erneut und hält statt
+  hochzuregeln. Log mit Sekunden seit letztem Befehl zur Ursachenanalyse.
+- Simulator: `--dropout-every`
+
+### Fixed / Behoben
+- Averages are now time weighted with sample-and-hold. Before, a sensor that only sends
+  on change produced empty averaging windows (state flapping IDLE/REGULATING, delayed
+  reactions). / Mittelwerte zeitgewichtet; vorher leere Fenster bei Sensor, der nur bei
+  Änderung sendet.
+
 ## [0.3.1] – 2026-10-10
 
 ### Changed / Geändert

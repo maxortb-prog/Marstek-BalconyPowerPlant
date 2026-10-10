@@ -23,6 +23,7 @@ Household / grid meter simulation for load following (Lastfolgeregelung):
     --tau 1.5        s, time constant of the inverter output
     --dropout-at 90  s, device stops feeding in ...
     --dropout-for 40 s, ... for this long (0 = until the next setpoint change)
+    --dropout-every 120  repeat the dropout every N s (needs --dropout-at and --dropout-for)
     --auto-output 250   W the device feeds in while in Auto mode (e.g. after boot)
     --hang-after 6 --hang-for 40   stop answering after 6 answers for 40 s (init test)
 """
@@ -206,7 +207,11 @@ async def household(args: argparse.Namespace, dev: VenusA) -> None:
             await asyncio.sleep(1.0)
             t = time.time() - t0
             if args.dropout_at and not dropout_done and t >= args.dropout_at:
-                dev.dropped, dropout_done = True, True
+                dev.dropped = True
+                if args.dropout_every:
+                    args.dropout_at += args.dropout_every      # schedule the next one
+                else:
+                    dropout_done = True
                 dev.dropout_until = t + args.dropout_for if args.dropout_for else 0
                 print(f"!! t={t:.0f}s simulated dropout - device stops feeding in", flush=True)
             if dev.dropout_until and t >= dev.dropout_until:
@@ -242,6 +247,7 @@ async def main() -> None:
     ap.add_argument("--dropout-at", type=float, default=0.0)
     ap.add_argument("--dropout-for", type=float, default=0.0)
     ap.add_argument("--auto-output", type=float, default=0.0)
+    ap.add_argument("--dropout-every", type=float, default=0.0)
     ap.add_argument("--hang-after", type=int, default=0)
     ap.add_argument("--hang-for", type=float, default=40.0)
     args = ap.parse_args()

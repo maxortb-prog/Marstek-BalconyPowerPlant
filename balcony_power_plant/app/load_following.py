@@ -53,11 +53,14 @@ REGULATING = "REGULATING"      # setpoint changed, waiting for settle / averagin
 IDLE = "IDLE"                  # grid inside deadband
 LIMITED = "LIMITED"            # import above deadband but setpoint = upper limit
 SENSOR_LOST = "SENSOR_LOST"
+HOLD = "HOLD"                  # device dropout suspected: hold setpoint, wait for recovery
+STATES = [OFF, WAITING, REGULATING, IDLE, LIMITED, HOLD, SENSOR_LOST]
 
 EXPORT_CALCULATED = "Calculated"
 EXPORT_MINIMUM = "Minimum"
 EXPORT_REACTIONS = [EXPORT_CALCULATED, EXPORT_MINIMUM]
 
+CANDIDATE_TIME = 6.0     # s to confirm a partial jump as dropout (output ramping down)
 REFERENCE_RETRY = 10     # s between reference reads (ES.GetStatus) at takeover
 TICK = 1.0                 # s, timer for timeouts / keep-alive
 SAMPLE_HISTORY = 120.0     # s of sensor samples kept
@@ -79,6 +82,15 @@ NUMBERS: dict[str, tuple[str, float, float, float, str | None, float]] = {
     "lf_cd_time":         ("Countdown cd_time", 30, 3600, 10, "s", 120),
     "lf_keepalive_pct":   ("Keepalive at", 10, 90, 5, "%", 50),
     "lf_sensor_timeout":  ("Sensor timeout", 5, 300, 5, "s", 30),
+    "lf_dropout_tolerance":     ("Dropout tolerance", 0, 200, 1, "W", 15),
+    "lf_dropout_tolerance_pct": ("Dropout tolerance percent", 0, 50, 1, "%", 10),
+    "lf_dropout_hold":          ("Dropout hold time", 5, 120, 1, "s", 30),
+}
+
+# option key -> (HA name, default)
+SWITCHES: dict[str, tuple[str, bool]] = {
+    "lf_dropout_detect": ("Dropout detection", True),
+    "lf_dropout_resend": ("Dropout resend setpoint", True),
 }
 
 
@@ -99,7 +111,14 @@ class LoadFollower:
         self.target_sp: float | None = None
         self.in_export = False
         self.counters = {"commands": 0, "keepalives": 0, "export_events": 0,
-                         "suspected_dropouts": 0, "sensor_values": 0, "invalid_values": 0}
+                         "suspected_dropouts": 0, "sensor_values": 0, "invalid_values": 0,
+                         "dropouts": 0, "dropout_recoveries": 0, "dropout_timeouts": 0}
+        # dropout hold
+        self.hold_start: float | None = None
+        self.hold_level: float | None = None    # grid level before the jump
+        self.last_dropout_s: float | None = None
+        self._candidate_until: float | None = None
+        self._candidate_level: float | None = None
         self._check: dict[str, Any] | None = None     # pending plausibility check
         self._strikes = 0
         self._dirty = True
@@ -176,6 +195,7 @@ class LoadFollower:
         self._ref_pending = False
         self._ref_next_try = 0.0
         self._check, self._strikes = None, 0
+        self.hold_start = self.hold_level = None
         self.state = WAITING if self.enabled else OFF
         self._dirty = True
 
@@ -244,7 +264,8 @@ class LoadFollower:
                 _LOG.warning("Grid sensor: invalid payload %r ignored", payload)
             return
         self.samples.append((now, value))
-        while self.samples and now - self.samples[0][0] > SAMPLE_HISTORY:
+        # keep the newest sample older than the history: it is the held value
+        while len(self.samples) > 1 and now - self.samples[1][0] > SAMPLE_HISTORY:
             self.samples.popleft()
         self.counters["sensor_values"] += 1
         _LOG.trace("Grid sensor %.0f W", value)
@@ -273,14 +294,40 @@ class LoadFollower:
                     continue
         return None
 
+    def _integrate(self, t0: float, t1: float) -> float | None:
+        """Time weighted average of the grid power between t0 and t1. A value is
+        held until the next one arrives (sample and hold), so a sensor that only
+        reports changes still gives a correct average."""
+        held: float | None = None
+        seg_start = t0
+        area = 0.0
+        begin = None
+        for t, v in self.samples:
+            if t <= t0:
+                held = v
+                continue
+            if t >= t1:
+                break
+            if held is not None:
+                area += held * (t - seg_start)
+                if begin is None:
+                    begin = seg_start
+            seg_start = t
+            held = v
+        if held is None:
+            return None
+        area += held * (t1 - seg_start)
+        if begin is None:
+            begin = seg_start
+        return area / (t1 - begin) if t1 > begin else held
+
     def _avg(self, window: float, since: float, now: float) -> float | None:
-        """Average of the samples of the last `window` s that are newer than
-        `since`. None if the window is not yet fully covered."""
+        """Time weighted average over the last `window` s. None if the window
+        starts before `since` (still settling)."""
         start = now - window
         if start < since:
             return None
-        vals = [v for t, v in self.samples if t >= start]
-        return sum(vals) / len(vals) if vals else None
+        return self._integrate(start, now)
 
     # ---------------------------------------------------------- regulation
     def evaluate(self) -> None:
@@ -341,6 +388,13 @@ class LoadFollower:
         target = self.o("lf_target_power")
         min_p = int(self.o("lf_min_power"))
 
+        # --- dropout hold -----------------------------------------------------
+        if self.hold_start is not None:
+            if self._hold(now, lower):
+                return
+        elif self._detect_dropout(now, settle_end):
+            return
+
         # --- regulate down (export side, fast) ----------------------------
         if self.avg_down is not None and self.avg_down < lower:
             latest = self.samples[-1][1]
@@ -387,6 +441,90 @@ class LoadFollower:
             self.target_sp = self.load_est - target
         self._set_state(IDLE if self.avg_up is not None else REGULATING)
         self._keepalive(now)
+
+    # ------------------------------------------------------- dropout hold
+    def sw(self, key: str) -> bool:
+        return bool(self.opts.get(key, SWITCHES[key][1]))
+
+    def _tolerance(self) -> float:
+        return max(self.o("lf_dropout_tolerance"),
+                   (self.setpoint or 0) * self.o("lf_dropout_tolerance_pct") / 100.0)
+
+    def _detect_dropout(self, now: float, settle_end: float) -> bool:
+        """Device fell out of regulation: the grid power jumps up by about the
+        active setpoint while nothing was commanded. Returns True if HOLD starts."""
+        if not self.sw("lf_dropout_detect") or self.state not in (IDLE, LIMITED, HOLD):
+            return False
+        sp = self.setpoint or 0
+        tol = self._tolerance()
+        if sp <= tol or len(self.samples) < 2:
+            return False
+        t_last, latest = self.samples[-1]
+        before_start = t_last - 10.0
+        if before_start < settle_end:
+            return False
+        before = self._integrate(before_start, t_last)
+        if self._candidate_until is not None and self._candidate_level is not None:
+            before = self._candidate_level      # compare with the level before the ramp
+        if before is None:
+            return False
+        jump = latest - before
+        if abs(jump - sp) > tol:
+            # partial jump towards the setpoint (output still ramping down):
+            # wait up to CANDIDATE_TIME for confirmation before regulating up
+            if 0.3 * sp <= jump < sp - tol and self.state != HOLD:
+                if self._candidate_until is None:
+                    self._candidate_until = now + CANDIDATE_TIME
+                    self._candidate_level = before
+                    _LOG.debug("Possible dropout: jump %+.0f W of %d W - waiting", jump, sp)
+                if now < self._candidate_until:
+                    return True
+            self._candidate_until = None
+            return False
+        self._candidate_until = None
+        self.hold_start, self.hold_level = now, before
+        self.counters["dropouts"] += 1
+        _LOG.warning(
+            "Dropout detected: grid %+.0f -> %+.0f W (jump %+.0f W ~ setpoint %d W, tol %.0f W)"
+            " - %.0f s after last command, %.0f s after last setpoint change - HOLD",
+            before, latest, jump, sp, tol, now - self.last_send, now - self.last_change)
+        self._set_state(HOLD)
+        self._dirty = True
+        if self.sw("lf_dropout_resend"):
+            self._send(sp, "dropout resend", change=False)
+        return True
+
+    def _hold(self, now: float, lower: float) -> bool:
+        """In HOLD: wait for the device to come back. Returns True while holding."""
+        assert self.hold_start is not None and self.hold_level is not None
+        latest = self.samples[-1][1]
+        held_for = now - self.hold_start
+        if abs(latest - self.hold_level) <= self._tolerance():
+            self.last_dropout_s = round(held_for, 1)
+            self.counters["dropout_recoveries"] += 1
+            _LOG.info("Dropout recovered after %.0f s (grid %+.0f W) - restarting averaging",
+                      held_for, latest)
+            self.hold_start = self.hold_level = None
+            self.last_change = now            # settle + fresh averaging windows
+            self._set_state(IDLE)
+            self._dirty = True
+            return True
+        if held_for >= self.o("lf_dropout_hold"):
+            self.last_dropout_s = round(held_for, 1)
+            self.counters["dropout_timeouts"] += 1
+            _LOG.warning("Dropout hold timed out after %.0f s - treating it as a real load "
+                         "change, regulating normally", held_for)
+            self.hold_start = self.hold_level = None
+            self._dirty = True
+            return False
+        avg_down = self._integrate(now - self.o("lf_avg_down"), now)
+        if avg_down is not None and avg_down < lower:
+            _LOG.warning("Export during HOLD (%+.0f W) - leaving HOLD, regulating down", avg_down)
+            self.hold_start = self.hold_level = None
+            return False
+        self._set_state(HOLD)
+        self._keepalive(now)
+        return True
 
     @staticmethod
     def _limit(value: int, min_p: int, cap: int) -> int:
@@ -493,6 +631,8 @@ class LoadFollower:
             "setpoint_target": r(self.target_sp),
             "power_limit": self.cap,
             "reference": None if self.reference is None else round(self.reference),
+            "hold_for": None if self.hold_start is None else round(time.monotonic() - self.hold_start),
+            "last_dropout_duration": self.last_dropout_s,
             "last_reason": self.last_reason,
             "last_command": self.last_cmd_ts,
             "keepalive_in": self.keepalive_in(),

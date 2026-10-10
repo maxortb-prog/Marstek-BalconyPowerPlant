@@ -126,6 +126,21 @@ configuration:
   lf_sensor_timeout:
     name: "Sensor timeout"
     description: "s without sensor value -> minimum power."
+  lf_dropout_detect:
+    name: "Dropout detection"
+    description: "Detect the device falling out of regulation (grid jumps up by ~setpoint) and hold the setpoint instead of regulating up."
+  lf_dropout_resend:
+    name: "Dropout resend setpoint"
+    description: "Re-send the setpoint immediately when a dropout is detected."
+  lf_dropout_tolerance:
+    name: "Dropout tolerance"
+    description: "W, tolerance = max(W, % of setpoint)."
+  lf_dropout_tolerance_pct:
+    name: "Dropout tolerance percent"
+    description: "% of the setpoint, tolerance = max(W, %)."
+  lf_dropout_hold:
+    name: "Dropout hold time"
+    description: "s to wait for recovery, then regulate normally."
   log_level:
     name: "Log level"
     description: "trace, debug, info, warning, error"

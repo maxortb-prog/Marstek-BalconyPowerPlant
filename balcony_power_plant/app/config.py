@@ -71,6 +71,11 @@ DEFAULTS: dict[str, Any] = {
     "lf_cd_time": 120,
     "lf_keepalive_pct": 50,
     "lf_sensor_timeout": 30,
+    "lf_dropout_detect": True,
+    "lf_dropout_resend": True,
+    "lf_dropout_tolerance": 15,
+    "lf_dropout_tolerance_pct": 10,
+    "lf_dropout_hold": 30,
     "log_level": "info",
 }
 

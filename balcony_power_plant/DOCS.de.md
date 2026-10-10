@@ -174,6 +174,8 @@ alias: BalconyPowerPlant Shelly Phase C RAW
 triggers:
   - trigger: state
     entity_id: sensor.shelly_phase_c
+  - trigger: time_pattern      # Heartbeat, damit der Sensor-Timeout nicht anspricht
+    seconds: /5
 conditions:
   - condition: template
     value_template: "{{ states('sensor.shelly_phase_c') not in ['unknown','unavailable','none',''] }}"
@@ -204,6 +206,8 @@ Sollwert        = geschätzte Last − Ziel-Netzleistung       begrenzt auf [0 |
 | zwischen unten und oben | Ruhe – nur Keepalive |
 | unter **Deadband lower** (0 W) | sofort runterregeln – Mittelwert über *Averaging time regulate down* (5 s) |
 
+- Mittelwerte sind **zeitgewichtet** (ein Wert gilt bis zum nächsten), daher
+  funktioniert auch ein Sensor, der nur bei Änderung sendet.
 - Regelziel ist **Target grid power** (8 W, leichter Bezug).
 - Ein Sollwert unter **Minimum power** (50 W) wird als **0 W** gesendet.
 - **Export reaction**: *Calculated* (Standard) springt direkt auf den berechneten
@@ -232,6 +236,29 @@ Sollwert        = geschätzte Last − Ziel-Netzleistung       begrenzt auf [0 |
 
 Deine alte Automation, die Passive zyklisch sendet, bei aktivem Load following deaktivieren.
 
+### Dropout hold
+
+Das Gerät fällt sporadisch aus der Regelung und setzt die Ausgabe auf 0 W
+(beobachtet etwa alle 2 min). Ohne Gegenmaßnahme würde der Regler hochregeln und
+beim Wiederkommen des Geräts in die Einspeisung überschwingen.
+
+**Erkennung** (nur in Ruhe, mindestens Einschwingzeit ohne Sollwertänderung):
+die Netzleistung springt innerhalb eines Messwerts um etwa den **aktiven
+Sollwert** (verglichen mit dem zeitgewichteten Mittel der 10 s davor).
+Toleranz = **max(Dropout tolerance W, Dropout tolerance percent × Sollwert)**,
+Standard max(15 W, 10 %) → ±15 W bei 40 W, ±50 W bei 500 W. Ein Teilsprung
+(Ausgabe fällt noch ab) wird bis zu 3 s bestätigt, bevor hochgeregelt wird.
+
+**HOLD**: kein Hochregeln; der Sollwert wird sofort erneut gesendet (*Dropout
+resend setpoint*), Keepalive läuft weiter.
+- Netz kehrt auf das Niveau vor dem Sprung zurück → *recovered*, Mittelwerte starten neu
+- *Dropout hold time* (30 s) ohne Wiederkehr → echter Lastwechsel, normale Regelung
+- Einspeisung während HOLD → HOLD verlassen, sofort runterregeln
+
+Jeder Dropout wird mit den Sekunden seit dem letzten Befehl / der letzten
+Sollwertänderung geloggt – damit lässt sich klären, ob er mit Keepalive oder
+cd_time zusammenhängt.
+
 ### Zustände
 
 | Zustand | Bedeutung |
@@ -241,6 +268,7 @@ Deine alte Automation, die Passive zyklisch sendet, bei aktivem Load following d
 | REGULATING | Sollwert geändert, Einschwingen / Mittelwertbildung |
 | IDLE | Netzleistung im Totband (oder Sollwert 0 W) |
 | LIMITED | mehr Bezug, aber Sollwert an der Grenze |
+| HOLD | Dropout erkannt, Sollwert wird gehalten, Warten auf Wiederkehr |
 | SENSOR_LOST | kein Sensorwert seit *Sensor timeout* |
 
 Diagnose-Entities: Netzleistung (roh / Mittel hoch / Mittel runter), geschätzte

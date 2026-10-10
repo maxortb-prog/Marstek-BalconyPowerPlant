@@ -23,7 +23,8 @@ from typing import Any
 import aiomqtt
 
 from config import OptionsStore
-from load_following import EXPORT_REACTIONS, NUMBERS as LF_NUMBERS, LoadFollower
+from load_following import (EXPORT_REACTIONS, NUMBERS as LF_NUMBERS, STATES as LF_STATES,
+                             SWITCHES as LF_SWITCHES, LoadFollower)
 from logger import get_logger, set_level
 from marstek_api import (
     MODES,
@@ -368,6 +369,9 @@ class Bridge:
         add("select", "lf_export_reaction", "Export reaction",
             cmd_t=self.t_cmd("lf_export_reaction"), stat_t=self.t_ctrl("lf_export_reaction"),
             ops=EXPORT_REACTIONS, ent_cat="config", ic="mdi:transmission-tower-off")
+        for key, (name, _default) in LF_SWITCHES.items():
+            add("switch", key, name, cmd_t=self.t_cmd(key), stat_t=self.t_ctrl(key),
+                ent_cat="config", ic="mdi:pause-octagon-outline")
         for key, (name, lo, hi, step, unit, _default) in LF_NUMBERS.items():
             extra: dict[str, Any] = {"cmd_t": self.t_cmd(key), "stat_t": self.t_ctrl(key),
                                      "min": lo, "max": hi, "step": step, "mode": "box",
@@ -378,7 +382,7 @@ class Bridge:
 
         st = self.t_state("load_following")
         add("sensor", "lf_state", "State", stat_t=st, val_tpl="{{ value_json.state }}",
-            dev_cla="enum", ops=["OFF", "WAITING", "REGULATING", "IDLE", "LIMITED", "SENSOR_LOST"],
+            dev_cla="enum", ops=LF_STATES,
             ic="mdi:state-machine")
         for key, name, icon in (
             ("grid_raw", "Grid power", "mdi:transmission-tower"),
@@ -397,6 +401,11 @@ class Bridge:
             val_tpl="{{ value_json.last_reason }}", ic="mdi:comment-text-outline")
         add("sensor", "lf_last_command", "Last command", stat_t=st,
             val_tpl="{{ value_json.last_command }}", dev_cla="timestamp")
+        add("sensor", "lf_hold_for", "Hold elapsed", stat_t=st,
+            val_tpl="{{ value_json.hold_for }}", unit_of_meas="s", ic="mdi:pause-circle-outline")
+        add("sensor", "lf_last_dropout_duration", "Last dropout duration", stat_t=st,
+            val_tpl="{{ value_json.last_dropout_duration }}", unit_of_meas="s",
+            ic="mdi:timer-sand-complete")
         add("sensor", "lf_keepalive_in", "Keepalive in", stat_t=st,
             val_tpl="{{ value_json.keepalive_in }}", unit_of_meas="s",
             ic="mdi:timer-refresh-outline")
@@ -407,6 +416,9 @@ class Bridge:
             ("suspected_dropouts", "Suspected dropouts", "mdi:alert"),
             ("sensor_values", "Sensor values received", "mdi:counter"),
             ("invalid_values", "Invalid sensor values", "mdi:alert-circle-outline"),
+            ("dropouts", "Dropouts detected", "mdi:power-plug-off"),
+            ("dropout_recoveries", "Dropout recoveries", "mdi:power-plug"),
+            ("dropout_timeouts", "Dropout hold timeouts", "mdi:timer-off-outline"),
         ):
             add("sensor", f"lf_{key}", name, stat_t=st,
                 val_tpl=f"{{{{ value_json.{key} }}}}", stat_cla="total_increasing",
@@ -442,6 +454,8 @@ class Bridge:
         await self.publish(self.t_ctrl("lf_export_reaction"), self.lf.export_reaction)
         for key in LF_NUMBERS:
             await self.publish(self.t_ctrl(key), self.lf.o(key))
+        for key in LF_SWITCHES:
+            await self.publish(self.t_ctrl(key), _on_off(self.lf.sw(key)))
         await self.publish(self.t_state("load_following"), self.lf.snapshot())
 
     async def _publish_comm_pending(self) -> None:
@@ -760,6 +774,10 @@ class Bridge:
             self.opts.set("lf_export_reaction", payload)
             await self.publish(self.t_ctrl("lf_export_reaction"), payload)
             _LOG.info("Load following: export reaction %s", payload)
+        elif cmd in LF_SWITCHES:
+            self.opts.set(cmd, on)
+            await self.publish(self.t_ctrl(cmd), _on_off(on))
+            _LOG.info("Load following: %s %s", LF_SWITCHES[cmd][0], _on_off(on))
         elif cmd in LF_NUMBERS:
             _name, lo, hi, _step, _unit, _d = LF_NUMBERS[cmd]
             value = max(lo, min(hi, float(payload)))

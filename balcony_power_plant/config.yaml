@@ -1,5 +1,5 @@
 name: BalconyPowerPlant
-version: "0.3.1"
+version: "0.3.2"
 slug: balcony_power_plant
 description: >-
   Local UDP bridge between a Marstek Venus battery (Open API Rev 2.0)
@@ -65,6 +65,11 @@ options:
   lf_cd_time: 120
   lf_keepalive_pct: 50
   lf_sensor_timeout: 30
+  lf_dropout_detect: true
+  lf_dropout_resend: true
+  lf_dropout_tolerance: 15
+  lf_dropout_tolerance_pct: 10
+  lf_dropout_hold: 30
   # --- Logging ---
   log_level: info
 schema:
@@ -111,4 +116,9 @@ schema:
   lf_cd_time: int(30,3600)
   lf_keepalive_pct: int(10,90)
   lf_sensor_timeout: int(5,300)
+  lf_dropout_detect: bool
+  lf_dropout_resend: bool
+  lf_dropout_tolerance: int(0,200)
+  lf_dropout_tolerance_pct: int(0,50)
+  lf_dropout_hold: int(5,120)
   log_level: list(trace|debug|info|warning|error)

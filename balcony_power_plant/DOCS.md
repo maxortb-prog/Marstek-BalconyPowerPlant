@@ -172,6 +172,8 @@ alias: BalconyPowerPlant Shelly Phase C RAW
 triggers:
   - trigger: state
     entity_id: sensor.shelly_phase_c
+  - trigger: time_pattern      # heartbeat, keeps the sensor timeout quiet
+    seconds: /5
 conditions:
   - condition: template
     value_template: "{{ states('sensor.shelly_phase_c') not in ['unknown','unavailable','none',''] }}"
@@ -202,6 +204,8 @@ setpoint       = estimated load − target grid power        limited to [0 | min
 | between lower and upper | idle – only keep-alive |
 | below **Deadband lower** (0 W) | regulate down immediately – average over *Averaging time regulate down* (5 s) |
 
+- Averages are **time weighted** (a value is held until the next one arrives), so a
+  sensor that only reports changes works correctly.
 - Regulation target is **Target grid power** (8 W, slight import).
 - A setpoint below **Minimum power** (50 W) is sent as **0 W**.
 - **Export reaction**: *Calculated* (default) jumps directly to the calculated
@@ -230,6 +234,28 @@ setpoint       = estimated load − target grid power        limited to [0 | min
 
 Disable your old automation that sends Passive cyclically while load following is on.
 
+### Dropout hold
+
+The device sporadically falls out of regulation and drops its output to 0 W
+(observed about every 2 min). Without countermeasure the regulator would chase
+this (regulate up) and overshoot into export when the device comes back.
+
+**Detection** (only when idle, no setpoint change for at least the settle time):
+the grid power jumps up by about the **active setpoint** within one sample
+(compared with the time weighted average of the 10 s before).
+Tolerance = **max(Dropout tolerance W, Dropout tolerance percent × setpoint)**,
+default max(15 W, 10 %) → ±15 W at 40 W, ±50 W at 500 W. A partial jump (output
+still ramping down) is confirmed within up to 3 s before regulating up.
+
+**HOLD**: no regulating up; the setpoint is re-sent immediately (*Dropout resend
+setpoint*), keep-alive continues.
+- grid returns to the level before the jump → *recovered*, averaging restarts
+- *Dropout hold time* (30 s) without recovery → real load change, normal regulation
+- export during HOLD → leave HOLD and regulate down immediately
+
+Every dropout is logged with the seconds since the last command / setpoint
+change – useful to find out whether it is linked to keep-alive or cd_time.
+
 ### States
 
 | State | Meaning |
@@ -239,6 +265,7 @@ Disable your old automation that sends Passive cyclically while load following i
 | REGULATING | setpoint changed, settling / averaging |
 | IDLE | grid power inside the deadband (or setpoint 0 W) |
 | LIMITED | more import, but the setpoint is at the limit |
+| HOLD | dropout detected, holding the setpoint and waiting for recovery |
 | SENSOR_LOST | no sensor value for *Sensor timeout* |
 
 Diagnostic entities: grid power (raw / average up / average down), estimated
