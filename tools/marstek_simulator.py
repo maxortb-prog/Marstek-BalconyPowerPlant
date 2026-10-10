@@ -23,6 +23,8 @@ Household / grid meter simulation for load following (Lastfolgeregelung):
     --tau 1.5        s, time constant of the inverter output
     --dropout-at 90  s, device stops feeding in ...
     --dropout-for 40 s, ... for this long (0 = until the next setpoint change)
+    --auto-output 250   W the device feeds in while in Auto mode (e.g. after boot)
+    --hang-after 6 --hang-for 40   stop answering after 6 answers for 40 s (init test)
 """
 
 from __future__ import annotations
@@ -48,9 +50,16 @@ class VenusA:
         self.dropped = False       # simulated "fell out of regulation"
         self.dropout_until = 0.0   # >0: dropout ends at this sim time
 
+    auto_output = 0.0
+
     def target_output(self) -> float:
-        if self.mode != "Passive" or time.time() > self.passive_until or self.dropped:
+        if self.mode == "Passive" and time.time() > self.passive_until:
+            self.mode = "Auto"                 # cd_time expired -> back to Auto
+            print("   cd_time expired -> Auto", flush=True)
+        if self.dropped:
             return 0.0
+        if self.mode != "Passive":
+            return float(self.auto_output)
         return float(max(0, self.passive_power))
 
     def handle(self, method: str, params: dict) -> dict:
@@ -85,8 +94,10 @@ class VenusA:
                     "total_grid_output_energy": 2548, "total_grid_input_energy": 3273,
                     "total_load_energy": 0}
         if method == "ES.GetMode":
-            return {"id": params.get("id"), "mode": self.mode, "ongrid_power": 0,
-                    "offgrid_power": 0, "bat_soc": self.soc, "ct_state": 0}
+            return {"id": params.get("id"), "mode": self.mode, "ongrid_power": round(self.output),
+                    "offgrid_power": 0, "bat_soc": self.soc, "ct_state": 0, "a_power": 0,
+                    "b_power": 0, "c_power": 0, "total_power": 0,
+                    "input_energy": 3086320, "output_energy": 4487510}
         if method == "ES.SetMode":
             cfg = params.get("config", {})
             self.mode = cfg.get("mode", self.mode)
@@ -118,6 +129,10 @@ class Proto(asyncio.DatagramProtocol):
         self.args = args
         self.dev = VenusA()
         self.lock = asyncio.Lock()
+        self.dev.auto_output = args.auto_output
+        self.answered = 0
+        self.hang_until = 0.0
+        self.hang_done = False
 
     def connection_made(self, transport) -> None:
         self.transport = transport
@@ -141,6 +156,17 @@ class Proto(asyncio.DatagramProtocol):
         else:
             rid, method = req.get("id"), req.get("method")
             print(f"<< #{rid} {method} {req.get('params')}", flush=True)
+            a = self.args
+            if a.hang_after and self.answered >= a.hang_after and not self.hang_done:
+                if self.hang_until == 0:
+                    self.hang_until = time.time() + a.hang_for
+                    print(f"!! hanging for {a.hang_for:.0f} s (no answers)", flush=True)
+                if time.time() < self.hang_until:
+                    print(f"   #{rid} not answered (hang)", flush=True)
+                    return
+                self.hang_done = True
+                print("!! hang over - answering again", flush=True)
+            self.answered += 1
             if random.random() < self.args.drop:
                 print(f"   #{rid} dropped (simulated loss)", flush=True)
                 return
@@ -215,6 +241,9 @@ async def main() -> None:
     ap.add_argument("--tau", type=float, default=1.5)
     ap.add_argument("--dropout-at", type=float, default=0.0)
     ap.add_argument("--dropout-for", type=float, default=0.0)
+    ap.add_argument("--auto-output", type=float, default=0.0)
+    ap.add_argument("--hang-after", type=int, default=0)
+    ap.add_argument("--hang-for", type=float, default=40.0)
     args = ap.parse_args()
     loop = asyncio.get_running_loop()
     proto = Proto(args)

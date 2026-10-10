@@ -49,16 +49,22 @@ this. After a restart the add-on continues with exactly these values.
 
 ## Startup / initialization
 
-1. `Communication established` → **INIT**
-2. `Marstek.GetDevice` – on success `device_type` and `device_ble_mac` are
-   written back (if empty)
-3. `Communication established` → **ON**
-4. DOD, LED and Bluetooth advertising are sent with the last values
-5. All enabled queries are requested once and published to MQTT
+The initialization is a **strict sequence** – every step waits for its answer:
 
-If the device does not answer, the state goes to **FAIL** and the
-initialization is repeated every 30 s. The button **Reinitialize** starts it again
-manually.
+1. `Communication established` → **INIT**
+2. `Marstek.GetDevice` – `device_type` / `device_ble_mac` are written back (if empty)
+3. DOD, LED and Bluetooth advertising are sent with the last values
+4. All enabled queries: WiFi, Bluetooth, Battery, PV, Mode
+5. **ES.GetStatus last** – `ongrid_power` is the reference for the load following takeover
+6. `Communication established` → **ON**, query devices are created in HA
+
+A **timeout at any step aborts** the initialization: state **FAIL**, the bridge
+waits **lf_cd_time** (so a still running Passive command has expired and the device
+is in a defined state, usually Auto) and then starts again from step 1. Nothing is
+skipped. While INIT / FAIL, requests and commands from HA are ignored (logged).
+The button **Reinitialize** starts it again manually.
+
+After the initialization, a timeout of a single request only keeps the previous data.
 
 ## Communication
 
@@ -100,7 +106,7 @@ Area BalconyPowerPlant
    ├─ BalconyPowerPlant Battery        SOC, Temperature, Remaining/Rated capacity, Charging/Discharging allowed (Bat.GetStatus)
    ├─ BalconyPowerPlant PV             PV1–PV4 power, voltage, current, working                           (PV.GetStatus)
    ├─ BalconyPowerPlant Energy system  SOC, Battery capacity, PV/Grid/Off-grid/Battery power, energy counters, Total PV energy (corrected) (ES.GetStatus)
-   ├─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
+   ├─ BalconyPowerPlant Mode           Operating mode, CT connected, Grid-tied / Off-grid power, SOC, CT values   (ES.GetMode)
    └─ BalconyPowerPlant Load following  Load following, settings, state, diagnostics (ES.SetMode Passive)
 ```
 
@@ -207,9 +213,13 @@ setpoint       = estimated load − target grid power        limited to [0 | min
   can keep setting *Passive power* + *Apply mode*: while load following is on this
   only changes the limit, nothing is sent to the device. If the limit drops below
   the active setpoint, the setpoint is reduced immediately.
+- **Takeover** (start and switching on): the current device output is read with
+  `ES.GetStatus` (`ongrid_power`, positive = output) and sent unchanged as Passive
+  setpoint – bumpless, the load estimate is correct from the first step. If the
+  read fails it is repeated every 10 s; nothing is sent until then.
 - **Interlock**: *Apply mode* with Auto / AI / UPS switches load following off.
-  Switching load following off sends 0 W once; afterwards the device falls back
-  when `cd_time` expires.
+  Switching load following off sends **nothing**: without keep-alive the device
+  falls back by itself (usually to Auto) when `cd_time` expires.
 - **Sensor timeout** (30 s) without a value → minimum power, state `SENSOR_LOST`.
 - The device is trusted to execute the setpoint (no read-back). A plausibility
   check only **logs** a *suspected dropout* if the grid power does not drop after
@@ -225,14 +235,14 @@ Disable your old automation that sends Passive cyclically while load following i
 | State | Meaning |
 |---|---|
 | OFF | switched off |
-| WAITING | waiting for initialization / first sensor value |
+| WAITING | waiting for initialization / first sensor value / takeover reference |
 | REGULATING | setpoint changed, settling / averaging |
 | IDLE | grid power inside the deadband (or setpoint 0 W) |
 | LIMITED | more import, but the setpoint is at the limit |
 | SENSOR_LOST | no sensor value for *Sensor timeout* |
 
 Diagnostic entities: grid power (raw / average up / average down), estimated
-load, active and calculated setpoint, power limit, last command (reason / time),
+load, active and calculated setpoint, power limit, takeover reference, last command (reason / time),
 keep-alive countdown, counters for setpoint commands, keep-alives, export events,
 suspected dropouts and sensor values.
 

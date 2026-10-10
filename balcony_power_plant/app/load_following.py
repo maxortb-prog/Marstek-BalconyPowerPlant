@@ -58,6 +58,7 @@ EXPORT_CALCULATED = "Calculated"
 EXPORT_MINIMUM = "Minimum"
 EXPORT_REACTIONS = [EXPORT_CALCULATED, EXPORT_MINIMUM]
 
+REFERENCE_RETRY = 10     # s between reference reads (ES.GetStatus) at takeover
 TICK = 1.0                 # s, timer for timeouts / keep-alive
 SAMPLE_HISTORY = 120.0     # s of sensor samples kept
 DROPOUT_MIN_STEP = 50      # W, only setpoint increases >= this are checked
@@ -104,6 +105,10 @@ class LoadFollower:
         self._dirty = True
         self._task: asyncio.Task | None = None
         self._last_invalid_log = 0.0
+        # reference = current device output (ES.GetStatus ongrid_power, + = output)
+        self.reference: float | None = None
+        self._ref_pending = False
+        self._ref_next_try = 0.0
 
     # ------------------------------------------------------------- options
     def o(self, key: str) -> float:
@@ -163,24 +168,70 @@ class LoadFollower:
                 self._dirty = False
                 await self.b.publish(self.b.t_state("load_following"), self.snapshot())
 
+    def reset(self) -> None:
+        """Forget setpoint and reference (new initialization / switched on).
+        The next takeover reads the device output first."""
+        self.setpoint = None
+        self.reference = None
+        self._ref_pending = False
+        self._ref_next_try = 0.0
+        self._check, self._strikes = None, 0
+        self.state = WAITING if self.enabled else OFF
+        self._dirty = True
+
     def set_enabled(self, on: bool, reason: str) -> None:
         if on == self.enabled:
             return
         self.opts.set("lf_enabled", on)
-        self._check, self._strikes = None, 0
+        self.reset()
         if on:
-            _LOG.info("Load following ENABLED (%s) - starting at 0 W, limit %d W",
-                      reason, self.cap)
-            self.setpoint = None
-            self.state = WAITING
+            _LOG.info("Load following ENABLED (%s) - reading ES.GetStatus as reference, "
+                      "limit %d W", reason, self.cap)
             self.evaluate()
         else:
-            _LOG.info("Load following DISABLED (%s)", reason)
-            if self.setpoint and self.b.initialized and reason != "mode change":
-                # leave the device in a safe state: 0 W until cd_time expires
-                self._send(0, "disabled", change=True)
-            self.state = OFF
+            # nothing is sent: without keep-alive the device falls back by itself
+            # (usually to Auto) when cd_time expires
+            _LOG.info("Load following DISABLED (%s) - no more keep-alive, device falls back "
+                      "after cd_time", reason)
         self._dirty = True
+
+    # ------------------------------------------------------------ reference
+    def set_reference(self, ongrid_power: Any, source: str) -> None:
+        """Current device output from ES.GetStatus (ongrid_power, positive = output)."""
+        try:
+            value = float(ongrid_power)
+        except (TypeError, ValueError):
+            _LOG.warning("Reference from %s unusable: ongrid_power=%r", source, ongrid_power)
+            return
+        self.reference = value
+        self._ref_pending = False
+        _LOG.info("Reference from %s: device output (ongrid_power) %.0f W", source, value)
+        self._dirty = True
+
+    def _request_reference(self, now: float) -> None:
+        if self._ref_pending or now < self._ref_next_try:
+            return
+        self._ref_pending = True
+        _LOG.info("Reading ES.GetStatus as reference for the takeover")
+        from marstek_api import QUERIES, query_params   # local import, avoids a cycle
+        q = QUERIES["es_status"]
+        handler = self.b._query_handler(q) if self.b.query_enabled("es_status") else None
+        fut = self.b.udp.submit("ES.GetStatus", lambda i: query_params(q, i, ""),
+                                handler=handler, priority=True)
+
+        def done(f: asyncio.Future) -> None:
+            if f.cancelled():
+                self._ref_pending = False
+                return
+            if f.exception() is not None:
+                self._ref_pending = False
+                self._ref_next_try = time.monotonic() + REFERENCE_RETRY
+                _LOG.warning("Reference read failed (%s) - next try in %d s",
+                             f.exception().__class__.__name__, REFERENCE_RETRY)
+                return
+            self.set_reference(f.result().get("ongrid_power"), "ES.GetStatus")
+            self.evaluate()
+        fut.add_done_callback(done)
 
     # -------------------------------------------------------------- sensor
     def on_sensor(self, payload: str) -> None:
@@ -248,7 +299,7 @@ class LoadFollower:
             if self.state != SENSOR_LOST and self.samples:
                 _LOG.error("Grid sensor: no value for %.0f s - falling back to minimum power",
                            timeout)
-            if self.samples or self.setpoint is not None:
+            if self.setpoint is not None:
                 self._set_state(SENSOR_LOST)
                 fallback = min(int(self.o("lf_min_power")), self.cap)
                 if self.setpoint != fallback:
@@ -258,8 +309,15 @@ class LoadFollower:
                 self._set_state(WAITING)
             return
 
-        if self.setpoint is None:                  # just enabled
-            self._send(0, "start", change=True)
+        if self.setpoint is None:                  # takeover (start / switched on)
+            if self.reference is None:
+                self._set_state(WAITING)
+                self._request_reference(now)
+                return
+            value = int(round(max(0.0, min(self.reference, float(self.cap)))))
+            _LOG.info("Takeover: device output %.0f W -> Passive %d W (limit %d W)",
+                      self.reference, value, self.cap)
+            self._send(value, f"takeover {self.reference:.0f} W", change=True)
             self._set_state(REGULATING)
             return
 
@@ -434,6 +492,7 @@ class LoadFollower:
             "setpoint": self.setpoint,
             "setpoint_target": r(self.target_sp),
             "power_limit": self.cap,
+            "reference": None if self.reference is None else round(self.reference),
             "last_reason": self.last_reason,
             "last_command": self.last_cmd_ts,
             "keepalive_in": self.keepalive_in(),

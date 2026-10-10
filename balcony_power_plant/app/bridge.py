@@ -43,7 +43,10 @@ _LOG = get_logger("bridge")
 
 NODE_ID = "balcony_power_plant"
 DEVICE_NAME = "BalconyPowerPlant"
-INIT_RETRY_INTERVAL = 30  # seconds between failed initialization attempts
+# After a failed initialization the bridge waits lf_cd_time before the next attempt,
+# so that a still running Passive command has expired and the device is in a defined
+# state (usually Auto). / Nach Fehlschlag wird lf_cd_time abgewartet.
+INIT_ORDER = ("device", "wifi", "ble", "battery", "pv", "es_mode", "es_status")  # es_status last
 STATS_INTERVAL = 1.0      # seconds, max. publish rate of the statistics
 LOG_LEVELS = ["trace", "debug", "info", "warning", "error"]
 
@@ -385,6 +388,7 @@ class Bridge:
             ("setpoint", "Active setpoint", "mdi:target"),
             ("setpoint_target", "Calculated setpoint", "mdi:calculator"),
             ("power_limit", "Power limit", "mdi:arrow-collapse-up"),
+            ("reference", "Takeover reference", "mdi:import"),
         ):
             add("sensor", f"lf_{key}", name, stat_t=st,
                 val_tpl=f"{{{{ value_json.{key} }}}}", unit_of_meas="W",
@@ -488,40 +492,81 @@ class Bridge:
         self._init_task = asyncio.create_task(self._initialize(), name="init")
 
     async def _initialize(self) -> None:
+        """Initialization as a strict sequence. Every step waits for its answer.
+        A timeout at ANY step aborts: FAIL -> wait lf_cd_time -> start again from
+        the beginning. Nothing is skipped and nothing else is sent meanwhile."""
         self.initialized = False
-        await self.set_comm(COMM_INIT)
-        q = QUERIES["device"]
+        self.lf.reset()
         attempt = 0
         while True:
             attempt += 1
-            _LOG.info("Initialization attempt %d: %s -> %s:%s",
-                      attempt, q.method, self.opts["device_ip"], self.opts["device_udp_port"])
-            fut = self.udp.submit(
-                q.method,
-                lambda i: query_params(q, i, str(self.opts.get("device_ble_mac") or "")),
-                handler=self._query_handler(q),
-            )
-            try:
-                await fut
+            await self.set_comm(COMM_INIT)
+            _LOG.info("Initialization attempt %d -> %s:%s", attempt,
+                      self.opts["device_ip"], self.opts["device_udp_port"])
+            failed = await self._init_sequence()
+            if failed is None:
                 break
-            except (RequestTimeout, DeviceError) as err:
-                _LOG.error("Initialization failed (%s), next attempt in %ds",
-                           err.__class__.__name__ if isinstance(err, RequestTimeout) else err,
-                           INIT_RETRY_INTERVAL)
-                await self.set_comm(COMM_FAIL)
-                await asyncio.sleep(INIT_RETRY_INTERVAL)
-                await self.set_comm(COMM_INIT)
+            wait = int(self.lf.o("lf_cd_time"))
+            _LOG.error("Initialization aborted: no answer to %s - waiting lf_cd_time %d s "
+                       "before the next attempt", failed, wait)
+            await self.set_comm(COMM_FAIL)
+            for remaining in range(wait, 0, -1):
+                if remaining % 30 == 0 or remaining == 10:
+                    _LOG.info("Next initialization attempt in %d s", remaining)
+                await asyncio.sleep(1)
 
         self.initialized = True
         await self.set_comm(COMM_ON)
         for qq in QUERIES.values():
             await self.publish_query_discovery(qq)
-        _LOG.info("Query devices published to Home Assistant")
-        _LOG.info("Initialization done, sending device settings and initial queries")
-        self.send_dod(int(self.opts["dod"]))
-        self.send_led(bool(self.opts["led"]))
-        self.send_ble_adv(bool(self.opts["ble_adv"]))
-        self.request_all(skip=("device",))
+        _LOG.info("Initialization done (attempt %d), query devices published", attempt)
+        self.lf.evaluate()
+
+    async def _init_sequence(self) -> str | None:
+        """Run all init steps. Returns None on success or the name of the step
+        that timed out."""
+        ble = lambda: str(self.opts.get("device_ble_mac") or "")  # noqa: E731
+
+        async def step(name: str, fut: asyncio.Future) -> dict[str, Any] | None | bool:
+            try:
+                return await fut
+            except RequestTimeout:
+                return False
+            except DeviceError as err:      # device answered -> communication is fine
+                _LOG.error("Initialization step %s: device error %s - continuing", name, err)
+                return None
+            except asyncio.CancelledError:
+                if fut.cancelled():
+                    return None
+                raise
+
+        # 1. device info (always)
+        q = QUERIES["device"]
+        res = await step(q.method, self.udp.submit(
+            q.method, lambda i: query_params(q, i, ble()), handler=self._query_handler(q)))
+        if res is False:
+            return q.method
+        # 2. settings, sent with the last values
+        if await step("DOD.SET", self.send_dod(int(self.opts["dod"]))) is False:
+            return "DOD.SET"
+        if await step("Led.Ctrl", self.send_led(bool(self.opts["led"]))) is False:
+            return "Led.Ctrl"
+        if await step("Ble.Adv", self.send_ble_adv(bool(self.opts["ble_adv"]))) is False:
+            return "Ble.Adv"
+        # 3. enabled queries, ES.GetStatus last (reference for load following)
+        for key in INIT_ORDER[1:]:
+            q = QUERIES[key]
+            needed = self.query_enabled(key) or (key == "es_status" and self.lf.enabled)
+            if not needed:
+                continue
+            handler = self._query_handler(q) if self.query_enabled(key) else None
+            res = await step(q.method, self.udp.submit(
+                q.method, lambda i, q=q: query_params(q, i, ble()), handler=handler))
+            if res is False:
+                return q.method
+            if key == "es_status" and isinstance(res, dict):
+                self.lf.set_reference(res.get("ongrid_power"), "initialization")
+        return None
 
     # ===================================================== watchdog / stats
     def _on_alive(self) -> None:
@@ -562,8 +607,16 @@ class Bridge:
                 await self._on_device_mode(data.get("mode"))
         return handler
 
+    def ready(self, what: str) -> bool:
+        if not self.initialized:
+            _LOG.warning("%s ignored - communication not established (%s)", what, self.comm_state)
+            return False
+        return True
+
     def request(self, key: str) -> None:
         q = QUERIES[key]
+        if not self.ready(f"Request {q.label}"):
+            return
         if not self.query_enabled(key):
             _LOG.warning("Request %s ignored - query is disabled", q.label)
             return
@@ -571,6 +624,8 @@ class Bridge:
         self.udp.submit(q.method, lambda i: query_params(q, i, ble), handler=self._query_handler(q))
 
     def request_all(self, skip: tuple[str, ...] = ()) -> None:
+        if not self.ready("Request all"):
+            return
         for key in QUERIES:
             if key not in skip and self.query_enabled(key):
                 self.request(key)
@@ -606,27 +661,27 @@ class Bridge:
                 _LOG.error("%s rejected by device: %s", what, result)
         return handler
 
-    def send_dod(self, value: int) -> None:
+    def send_dod(self, value: int) -> asyncio.Future:
         value = max(30, min(88, int(value)))
 
         async def ok() -> None:
             self.opts.set("dod", value)
             await self.publish(self.t_ctrl("dod"), value)
-        self.udp.submit("DOD.SET", lambda i: dod_params(i, value),
+        return self.udp.submit("DOD.SET", lambda i: dod_params(i, value),
                         handler=self._set_handler(f"DOD {value}%", ok))
 
-    def send_led(self, on: bool) -> None:
+    def send_led(self, on: bool) -> asyncio.Future:
         async def ok() -> None:
             self.opts.set("led", on)
             await self.publish(self.t_ctrl("led"), _on_off(on))
-        self.udp.submit("Led.Ctrl", lambda i: led_params(i, on),
+        return self.udp.submit("Led.Ctrl", lambda i: led_params(i, on),
                         handler=self._set_handler(f"LED {_on_off(on)}", ok))
 
-    def send_ble_adv(self, on: bool) -> None:
+    def send_ble_adv(self, on: bool) -> asyncio.Future:
         async def ok() -> None:
             self.opts.set("ble_adv", on)
             await self.publish(self.t_ctrl("ble_adv"), _on_off(on))
-        self.udp.submit("Ble.Adv", lambda i: ble_adv_params(i, on),
+        return self.udp.submit("Ble.Adv", lambda i: ble_adv_params(i, on),
                         handler=self._set_handler(f"Bluetooth advertising {_on_off(on)}", ok))
 
     def apply_mode(self) -> None:
@@ -730,13 +785,17 @@ class Bridge:
             self.opts.set("passive_cd_time", value)
             await self.publish(self.t_ctrl("passive_cd_time"), value)
         elif cmd == "apply_mode":
-            self.apply_mode()
+            if self.ready("Apply mode"):
+                self.apply_mode()
         elif cmd == "dod":
-            self.send_dod(int(round(float(payload))))
+            if self.ready("DOD"):
+                self.send_dod(int(round(float(payload))))
         elif cmd == "led":
-            self.send_led(on)
+            if self.ready("LED"):
+                self.send_led(on)
         elif cmd == "ble_adv":
-            self.send_ble_adv(on)
+            if self.ready("Bluetooth advertising"):
+                self.send_ble_adv(on)
         elif cmd == "queue_enabled":
             self.comm_pending.queue_enabled = on
             await self._publish_comm_pending()

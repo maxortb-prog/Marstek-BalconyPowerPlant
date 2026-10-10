@@ -117,6 +117,27 @@ QUERIES: dict[str, Query] = {
     "es_mode": Query("es_mode", "ES.GetMode", "Energy system mode", "Mode", (
         Field("mode", "Operating mode", numeric=False, icon="mdi:cog-transfer"),
         Field("ct_state", "CT connected", component="binary_sensor", diagnostic=True),
+        # raw values reported by the device (positive ongrid_power = output)
+        Field("ongrid_power", "Grid-tied power", unit="W", device_class="power",
+              state_class="measurement"),
+        Field("offgrid_power", "Off-grid power", unit="W", device_class="power",
+              state_class="measurement"),
+        Field("bat_soc", "SOC", unit="%", device_class="battery", state_class="measurement"),
+        # CT values: only valid in Auto / AI mode (API doc)
+        Field("a_power", "CT phase A power", unit="W", device_class="power",
+              state_class="measurement", diagnostic=True),
+        Field("b_power", "CT phase B power", unit="W", device_class="power",
+              state_class="measurement", diagnostic=True),
+        Field("c_power", "CT phase C power", unit="W", device_class="power",
+              state_class="measurement", diagnostic=True),
+        Field("total_power", "CT total power", unit="W", device_class="power",
+              state_class="measurement", diagnostic=True),
+        Field("input_energy_wh", "CT input energy", unit="Wh", device_class="energy",
+              state_class="total_increasing", diagnostic=True,
+              source="input_energy", factor=0.1),
+        Field("output_energy_wh", "CT output energy", unit="Wh", device_class="energy",
+              state_class="total_increasing", diagnostic=True,
+              source="output_energy", factor=0.1),
     )),
 }
 

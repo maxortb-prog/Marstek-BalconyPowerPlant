@@ -3,6 +3,27 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.1] – 2026-10-10
+
+### Changed / Geändert
+- Initialization is a strict sequence (GetDevice, DOD, LED, BLE, enabled queries,
+  **ES.GetStatus last**). A timeout at any step aborts: FAIL -> wait **lf_cd_time** ->
+  start again. Nothing is skipped; requests/commands from HA are ignored meanwhile.
+  / Initialisierung als feste Sequenz, ES.GetStatus zuletzt. Timeout bei jedem Schritt:
+  FAIL -> lf_cd_time warten -> neu starten. Nichts wird übersprungen.
+- Load following **takeover**: start reference = device output (`ongrid_power` from
+  ES.GetStatus), sent unchanged as Passive setpoint (bumpless). No more start at 0 W.
+  / Stoßfreie Übernahme mit der aktuellen Geräteausgabe statt Start bei 0 W.
+- Switching load following off sends nothing anymore; the device falls back after
+  cd_time. / Beim Ausschalten wird nichts mehr gesendet.
+
+### Added / Neu
+- Device *Mode*: raw values from ES.GetMode – Grid-tied power, Off-grid power, SOC,
+  CT phase A/B/C / total power, CT input/output energy (×0.1)
+  / Rohwerte aus ES.GetMode
+- Load following: sensor *Takeover reference*
+- Simulator: `--auto-output`, `--hang-after` / `--hang-for`
+
 ## [0.3.0] – 2026-10-09
 
 ### Added / Neu

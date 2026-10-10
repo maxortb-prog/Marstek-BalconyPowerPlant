@@ -49,15 +49,22 @@ Supervisor-API in die Add-on-Konfiguration zurückgeschrieben. Das Add-on wird d
 
 ## Start / Initialisierung
 
-1. `Communication established` → **INIT**
-2. `Marstek.GetDevice` – bei Erfolg werden `device_type` und `device_ble_mac`
-   zurückgesichert (falls leer)
-3. `Communication established` → **ON**
-4. DOD, LED und Bluetooth-Advertising werden mit den letzten Werten gesendet
-5. Alle aktiven Abfragen werden einmal ausgeführt und an MQTT gesendet
+Die Initialisierung ist eine **feste Sequenz** – jeder Schritt wartet auf seine Antwort:
 
-Antwortet das Gerät nicht, geht der Status auf **FAIL**, und die Initialisierung
-wird alle 30 s wiederholt. Mit dem Button **Reinitialize** startest du sie manuell neu.
+1. `Communication established` → **INIT**
+2. `Marstek.GetDevice` – `device_type` / `device_ble_mac` werden zurückgesichert (falls leer)
+3. DOD, LED und Bluetooth-Advertising werden mit den letzten Werten gesendet
+4. Alle aktiven Abfragen: WiFi, Bluetooth, Battery, PV, Mode
+5. **ES.GetStatus als letzte** – `ongrid_power` ist der Bezugspunkt für die Übernahme durch Load following
+6. `Communication established` → **ON**, Abfrage-Geräte werden in HA angelegt
+
+Ein **Timeout bei irgendeinem Schritt bricht ab**: Status **FAIL**, die Bridge
+wartet **lf_cd_time** (ein noch laufender Passive-Befehl ist dann abgelaufen und das
+Gerät in einem definierten Zustand, meist Auto) und startet wieder bei Schritt 1.
+Es wird nichts übersprungen. Während INIT / FAIL werden Abfragen und Befehle aus HA
+ignoriert (geloggt). Mit **Reinitialize** startest du sie manuell neu.
+
+Nach der Initialisierung behält ein Timeout einer einzelnen Abfrage nur die bisherigen Daten.
 
 ## Kommunikation
 
@@ -99,7 +106,7 @@ Area BalconyPowerPlant
    ├─ BalconyPowerPlant Battery        SOC, Temperature, Remaining/Rated capacity, Charging/Discharging allowed (Bat.GetStatus)
    ├─ BalconyPowerPlant PV             PV1–PV4 power, voltage, current, working                           (PV.GetStatus)
    ├─ BalconyPowerPlant Energy system  SOC, Battery capacity, PV/Grid/Off-grid/Battery power, energy counters, Total PV energy (corrected) (ES.GetStatus)
-   ├─ BalconyPowerPlant Mode           Operating mode, CT connected                                       (ES.GetMode)
+   ├─ BalconyPowerPlant Mode           Operating mode, CT connected, Grid-tied / Off-grid power, SOC, CT values   (ES.GetMode)
    └─ BalconyPowerPlant Load following  Load following, settings, state, diagnostics (ES.SetMode Passive)
 ```
 
@@ -208,9 +215,13 @@ Sollwert        = geschätzte Last − Ziel-Netzleistung       begrenzt auf [0 |
   kann weiter *Passive power* + *Apply mode* setzen: Bei aktivem Load following
   ändert das nur die Grenze, ans Gerät wird nichts gesendet. Fällt die Grenze unter
   den aktiven Sollwert, wird sofort reduziert.
+- **Übernahme** (Start und Einschalten): Die aktuelle Ausgabe des Geräts wird mit
+  `ES.GetStatus` (`ongrid_power`, positiv = Ausgabe) gelesen und unverändert als
+  Passive-Sollwert gesendet – stoßfrei, die Lastschätzung stimmt ab dem ersten
+  Schritt. Schlägt das Lesen fehl, wird es alle 10 s wiederholt; bis dahin wird nichts gesendet.
 - **Verriegelung**: *Apply mode* mit Auto / AI / UPS schaltet Load following ab.
-  Beim Ausschalten wird einmal 0 W gesendet; danach fällt das Gerät nach Ablauf der
-  `cd_time` zurück.
+  Beim Ausschalten wird **nichts** gesendet: Ohne Keepalive fällt das Gerät nach
+  Ablauf der `cd_time` selbst zurück (meist Auto).
 - **Sensor timeout** (30 s) ohne Wert → Minimum-Leistung, Zustand `SENSOR_LOST`.
 - Es wird darauf vertraut, dass das Gerät den Sollwert umsetzt (kein Rücklesen).
   Eine Plausibilitätsprüfung **loggt** nur einen *suspected dropout*, wenn der
@@ -226,14 +237,14 @@ Deine alte Automation, die Passive zyklisch sendet, bei aktivem Load following d
 | Zustand | Bedeutung |
 |---|---|
 | OFF | ausgeschaltet |
-| WAITING | wartet auf Initialisierung / ersten Sensorwert |
+| WAITING | wartet auf Initialisierung / ersten Sensorwert / Übernahme-Bezugspunkt |
 | REGULATING | Sollwert geändert, Einschwingen / Mittelwertbildung |
 | IDLE | Netzleistung im Totband (oder Sollwert 0 W) |
 | LIMITED | mehr Bezug, aber Sollwert an der Grenze |
 | SENSOR_LOST | kein Sensorwert seit *Sensor timeout* |
 
 Diagnose-Entities: Netzleistung (roh / Mittel hoch / Mittel runter), geschätzte
-Last, aktiver und berechneter Sollwert, Leistungsgrenze, letzter Befehl (Grund /
+Last, aktiver und berechneter Sollwert, Leistungsgrenze, Übernahme-Bezugspunkt, letzter Befehl (Grund /
 Zeit), Keepalive-Countdown, Zähler für Sollwertbefehle, Keepalives,
 Einspeise-Ereignisse, vermutete Dropouts und Sensorwerte.
 
