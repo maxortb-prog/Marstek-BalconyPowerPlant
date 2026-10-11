@@ -265,8 +265,9 @@ change – useful to find out whether it is linked to keep-alive or cd_time.
 ### Keepalive jitter (test function)
 
 Hypothesis: the device's own regulation (it is also coupled to the Shelly) might
-misbehave when the output is very constant. With **Keepalive jitter** on, every
-keep-alive becomes a probe:
+misbehave when the output is very constant. With **Keepalive jitter** on, a probe runs
+every **Jitter interval** seconds (default 120 s, independent of the keep-alive; its
+commands refresh cd_time as well). Sensor *Next jitter in* shows the countdown:
 
 1. send **setpoint − Jitter amount %** (only downwards, default 50 %)
 2. wait *Settle time*, then average over *Averaging time regulate up*

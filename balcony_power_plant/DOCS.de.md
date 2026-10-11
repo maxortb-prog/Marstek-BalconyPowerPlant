@@ -268,8 +268,9 @@ cd_time zusammenhängt.
 ### Keepalive-Jitter (Testfunktion)
 
 These: Die geräteeigene Regelung (das Gerät ist selbst auch mit dem Shelly gekoppelt)
-kommt mit einer sehr konstanten Ausgabe nicht zurecht. Mit **Keepalive jitter** wird
-jeder Keepalive zum Test:
+kommt mit einer sehr konstanten Ausgabe nicht zurecht. Mit **Keepalive jitter** läuft alle
+**Jitter interval** Sekunden ein Test (Standard 120 s, unabhängig vom Keepalive; seine
+Befehle frischen die cd_time ebenfalls auf). Sensor *Next jitter in* zeigt den Countdown:
 
 1. **Sollwert − Jitter amount %** senden (nur nach unten, Standard 50 %)
 2. *Settle time* warten, dann über *Averaging time regulate up* mitteln
@@ -282,8 +283,7 @@ Dropout-Erkennung bleiben aktiv (ein Dropout im Jitter bricht ihn ab und startet
 Auch **am Deckel** (LIMITED, nach unten) und **bei 0 W** (z. B. Akku leer / Deckel 0 W aus
 HA): dann wird die Ausgabe so weit erhöht, dass der Bezug bis aufs Regelziel ausgeglichen wird
 (Netz ≈ 8 W, keine Einspeisung), **max. 100 W**, und danach wieder auf 0 gesetzt – auch wenn
-der Deckel aus HA 0 W ist (unter 10 W Bezug ausgelassen). Keine Einstellung nötig; das Timing
-folgt dem Keepalive (*Keepalive at* % der *Countdown cd_time*). Kein Jitter in HOLD.
+der Deckel aus HA 0 W ist (unter 10 W Bezug ausgelassen). Das Timing stellst du mit *Jitter interval* ein. Kein Jitter in HOLD.
 Beispiel: 500 W → 250 W für ~17 s; bei 0 W mit 60 W Bezug → +52 W, mit 300 W Bezug → +100 W.
 Zähler: *Jitter probes / followed / not followed / inconclusive*. Über *Dropout
 interval* sieht man, ob sich der Takt von ~123 s ändert.

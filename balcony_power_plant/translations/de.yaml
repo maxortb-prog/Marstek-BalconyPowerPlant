@@ -147,6 +147,9 @@ configuration:
   lf_jitter_pct:
     name: "Jitter-Betrag"
     description: "% vom aktiven Sollwert (nur nach unten)."
+  lf_jitter_interval:
+    name: "Jitter-Intervall"
+    description: "s zwischen zwei Jitter-Tests (unabhängig vom Keepalive)."
   log_level:
     name: "Log-Level"
     description: "trace, debug, info, warning, error"

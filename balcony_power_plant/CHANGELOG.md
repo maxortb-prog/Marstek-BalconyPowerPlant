@@ -3,6 +3,16 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.7] – 2026-10-10
+
+### Added / Neu
+- *Jitter interval* (s, default 120): the jitter test has its own timing, independent of
+  the keep-alive; sensor *Next jitter in*. / Eigenes Jitter-Intervall, unabhängig vom Keepalive.
+
+### Fixed / Behoben
+- An exception while processing a grid sensor value can no longer stop the whole bridge
+  (it is logged instead). / Fehler beim Verarbeiten eines Sensorwerts beendet die Bridge nicht mehr.
+
 ## [0.3.6] – 2026-10-10
 
 ### Changed / Geändert

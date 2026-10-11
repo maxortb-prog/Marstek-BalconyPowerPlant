@@ -78,6 +78,7 @@ DEFAULTS: dict[str, Any] = {
     "lf_dropout_hold": 30,
     "lf_jitter": False,
     "lf_jitter_pct": 50,
+    "lf_jitter_interval": 120,
     "log_level": "info",
 }
 

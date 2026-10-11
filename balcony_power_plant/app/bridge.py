@@ -410,6 +410,8 @@ class Bridge:
         add("sensor", "lf_dropout_interval", "Dropout interval", stat_t=st,
             val_tpl="{{ value_json.dropout_interval }}", unit_of_meas="s",
             stat_cla="measurement", ic="mdi:timer-sync-outline")
+        add("sensor", "lf_jitter_in", "Next jitter in", stat_t=st,
+            val_tpl="{{ value_json.jitter_in }}", unit_of_meas="s", ic="mdi:sine-wave")
         add("sensor", "lf_keepalive_in", "Keepalive in", stat_t=st,
             val_tpl="{{ value_json.keepalive_in }}", unit_of_meas="s",
             ic="mdi:timer-refresh-outline")
@@ -750,7 +752,10 @@ class Bridge:
             return
 
         if self.t_sensor and topic == self.t_sensor:
-            self.lf.on_sensor(payload)
+            try:
+                self.lf.on_sensor(payload)
+            except Exception:  # noqa: BLE001  never let the regulator kill the bridge
+                _LOG.exception("Load following: error while processing sensor value %r", payload)
             return
 
         prefix = f"{self.base}/cmd/"

@@ -92,6 +92,7 @@ NUMBERS: dict[str, tuple[str, float, float, float, str | None, float]] = {
     "lf_dropout_tolerance_pct": ("Dropout tolerance percent", 0, 50, 1, "%", 10),
     "lf_dropout_hold":          ("Dropout hold time", 5, 120, 1, "s", 30),
     "lf_jitter_pct":            ("Jitter amount", 5, 90, 5, "%", 50),
+    "lf_jitter_interval":       ("Jitter interval", 30, 3600, 10, "s", 120),
 }
 
 # option key -> (HA name, default)
@@ -124,6 +125,7 @@ class LoadFollower:
                          "jitter_probes": 0, "jitter_followed": 0, "jitter_not_followed": 0,
                          "jitter_inconclusive": 0}
         self.jitter: dict[str, Any] | None = None    # running keep-alive jitter test
+        self._last_jitter = 0.0                      # monotonic start of the last jitter
         # dropout hold
         self.hold_start: float | None = None
         self.hold_level: float | None = None    # grid level before the jump
@@ -210,6 +212,7 @@ class LoadFollower:
         self._check, self._strikes = None, 0
         self.hold_start = self.hold_level = None
         self.jitter = None
+        self._last_jitter = time.monotonic()        # first jitter one interval after start
         self.state = WAITING if self.enabled else OFF
         self._dirty = True
 
@@ -483,8 +486,7 @@ class LoadFollower:
                 _LOG.debug("Jitter at 0 W skipped - import %.0f W too small", before)
                 amount = 0
         if amount <= 0:
-            self._send(base, "keepalive", change=False)
-            return
+            return                                   # nothing to probe now
         self.jitter = {"phase": "down", "dir": direction, "base": base, "amount": amount,
                        "before": before, "t": now}
         self.counters["jitter_probes"] += 1
@@ -649,13 +651,18 @@ class LoadFollower:
     def _keepalive(self, now: float) -> None:
         if self.setpoint is None:
             return
+        # jitter test: own interval (lf_jitter_interval), independent of the keep-alive;
+        # its commands refresh cd_time as well
+        if (self.sw("lf_jitter") and self.state in (IDLE, LIMITED)
+                and self.hold_start is None and self.jitter is None
+                and now - self._last_jitter >= self.o("lf_jitter_interval")):
+            self._last_jitter = now
+            self._start_jitter(now)
+            if self.jitter is not None:
+                return
         interval = self.o("lf_cd_time") * self.o("lf_keepalive_pct") / 100.0
         if now - self.last_send >= interval:
             self.counters["keepalives"] += 1
-            if (self.sw("lf_jitter") and self.state in (IDLE, LIMITED)
-                    and self.hold_start is None and self.jitter is None):
-                self._start_jitter(now)
-                return
             self._send(self.setpoint, "keepalive", change=False)
 
     def keepalive_in(self) -> float | None:
@@ -748,6 +755,9 @@ class LoadFollower:
             "last_dropout_duration": self.last_dropout_s,
             "dropout_interval": self.dropout_interval,
             "jitter_phase": None if self.jitter is None else self.jitter["phase"],
+            "jitter_in": (None if not self.sw("lf_jitter") or self.setpoint is None else
+                          max(0, round(self.o("lf_jitter_interval")
+                                       - (time.monotonic() - self._last_jitter)))),
             "last_reason": self.last_reason,
             "last_command": self.last_cmd_ts,
             "keepalive_in": self.keepalive_in(),

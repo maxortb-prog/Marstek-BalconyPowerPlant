@@ -147,6 +147,9 @@ configuration:
   lf_jitter_pct:
     name: "Jitter amount"
     description: "% of the active setpoint (only downwards)."
+  lf_jitter_interval:
+    name: "Jitter interval"
+    description: "s between two jitter tests (independent of the keep-alive)."
   log_level:
     name: "Log level"
     description: "trace, debug, info, warning, error"
