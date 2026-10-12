@@ -66,6 +66,7 @@ DROPOUT_UNDERSHOOT = 15  # W, the jump may be this much more BELOW the setpoint 
 DROPOUT_MIN_REF = 3.0    # s of settled grid values needed as reference before a jump
 JITTER_ZERO_MAX = 100    # W, jitter at 0 W: compensate the import (minus target), max. 100 W
 OBSOLETE_ENTITIES = [("number", "lf_jitter_zero_w")]   # removed from HA on discovery
+CD_TIME_GUARD = 10.0     # s, quiet HOLD: send a keep-alive anyway if cd_time ends sooner
 CANDIDATE_TIME = 6.0     # s to confirm a partial jump as dropout (output ramping down)
 REFERENCE_RETRY = 10     # s between reference reads (ES.GetStatus) at takeover
 TICK = 1.0                 # s, timer for timeouts / keep-alive
@@ -612,8 +613,9 @@ class LoadFollower:
         if abs(latest - self.hold_level) <= self._tolerance():
             self.last_dropout_s = round(held_for, 1)
             self.counters["dropout_recoveries"] += 1
-            _LOG.info("Dropout recovered after %.0f s (grid %+.0f W) - restarting averaging",
-                      held_for, latest)
+            _LOG.info("Dropout recovered after %.0f s (grid %+.0f W)%s - restarting averaging",
+                      held_for, latest,
+                      "" if self.sw("lf_dropout_resend") else " by itself (quiet hold)")
             self.hold_start = self.hold_level = None
             self.last_change = now            # settle + fresh averaging windows
             self._set_state(IDLE)
@@ -626,6 +628,14 @@ class LoadFollower:
                          "change, regulating normally", held_for)
             self.hold_start = self.hold_level = None
             self._dirty = True
+            if not self.sw("lf_dropout_resend") and self.setpoint:
+                # quiet hold: nothing was sent - wake the device with the setpoint once,
+                # then settle and average fresh before regulating (no overshoot on wake-up)
+                # -1 W: a changed value is more likely to be processed than an identical one
+                self._send(max(0, self.setpoint - 1), "hold timeout resend (-1 W)",
+                           change=True, count=False)
+                self._set_state(REGULATING)
+                return True
             return False
         avg_down = self._integrate(now - self.o("lf_avg_down"), now)
         if avg_down is not None and avg_down < lower:
@@ -633,7 +643,12 @@ class LoadFollower:
             self.hold_start = self.hold_level = None
             return False
         self._set_state(HOLD)
-        self._keepalive(now)
+        if self.sw("lf_dropout_resend"):
+            self._keepalive(now)
+        elif now - self.last_send >= self.o("lf_cd_time") - CD_TIME_GUARD and self.setpoint is not None:
+            # quiet hold: only send if cd_time would otherwise expire
+            self.counters["keepalives"] += 1
+            self._send(self.setpoint, "keepalive (cd_time guard)", change=False)
         return True
 
     @staticmethod

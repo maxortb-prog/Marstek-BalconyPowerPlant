@@ -262,6 +262,17 @@ device). Answers slower than 500 ms are logged as INFO and counted (*Slow respon
 Every dropout is logged with the seconds since the last command / setpoint
 change – useful to find out whether it is linked to keep-alive or cd_time.
 
+**Quiet hold** (*Dropout resend setpoint* off): during HOLD nothing is sent at all – not
+even a keep-alive (only if cd_time would otherwise expire within 10 s). The device's own
+check runs undisturbed; the log shows "recovered … by itself". If it does not come back
+within *Dropout hold time*, the setpoint − 1 W is sent once to wake it up, then the
+regulator settles and averages fresh before regulating (no overshoot on wake-up).
+
+**Reset suspected**: an ES.SetMode answer slower than 2 s or a timeout is logged as
+"Device reset suspected" with the time since the last one, and counted (*Resets
+suspected*, *Last reset suspected* in device Communication). No action is taken – the LED
+switching back on stays your visible sign of a device reset.
+
 ### Keepalive jitter (test function)
 
 Hypothesis: the device's own regulation (it is also coupled to the Shelly) might

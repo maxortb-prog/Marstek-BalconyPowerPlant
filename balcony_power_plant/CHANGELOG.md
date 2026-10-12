@@ -3,6 +3,17 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.8] – 2026-10-12
+
+### Added / Neu
+- **Quiet hold**: with *Dropout resend setpoint* off nothing is sent during HOLD (keep-alive
+  only if cd_time would expire within 10 s); on hold timeout the setpoint − 1 W is sent once
+  to wake the device, then settle + fresh averaging. For the A/B test whether our commands
+  disturb the device's own sensor check. / Stilles Halten für den A/B-Test.
+- **Reset suspected** logging: ES.SetMode slower than 2 s or timeout -> WARNING with time
+  since the last one, counter *Resets suspected*, sensor *Last reset suspected*.
+  / Vermuteter Geräte-Reset wird geloggt und gezählt (keine Aktion).
+
 ## [0.3.7] – 2026-10-10
 
 ### Added / Neu

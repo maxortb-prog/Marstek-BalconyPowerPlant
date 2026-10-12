@@ -265,6 +265,17 @@ Jeder Dropout wird mit den Sekunden seit dem letzten Befehl / der letzten
 Sollwertänderung geloggt – damit lässt sich klären, ob er mit Keepalive oder
 cd_time zusammenhängt.
 
+**Stilles Halten** (*Dropout resend setpoint* aus): während HOLD wird gar nichts gesendet –
+auch kein Keepalive (nur wenn die cd_time sonst in unter 10 s abliefe). Der geräteeigene
+Check läuft ungestört; im Log steht „recovered … by itself“. Kommt das Gerät innerhalb der
+*Dropout hold time* nicht zurück, wird einmal Sollwert − 1 W zum Aufwecken gesendet, danach
+schwingt der Regler ein und mittelt neu, bevor er regelt (kein Überschwinger beim Aufwachen).
+
+**Reset suspected**: eine ES.SetMode-Antwort über 2 s oder ein Timeout wird als „Device
+reset suspected“ mit dem Abstand zum letzten Mal geloggt und gezählt (*Resets suspected*,
+*Last reset suspected* im Gerät Communication). Es wird nichts unternommen – die wieder
+eingeschaltete LED bleibt dein sichtbares Zeichen für einen Geräte-Reset.
+
 ### Keepalive-Jitter (Testfunktion)
 
 These: Die geräteeigene Regelung (das Gerät ist selbst auch mit dem Shelly gekoppelt)

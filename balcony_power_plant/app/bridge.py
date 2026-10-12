@@ -336,6 +336,7 @@ class Bridge:
             ("errors", "Device errors", None, "mdi:alert-circle"),
             ("parse_repairs", "Repaired responses", None, "mdi:wrench"),
             ("slow_responses", "Slow responses", None, "mdi:snail"),
+            ("resets_suspected", "Resets suspected", None, "mdi:restart-alert"),
             ("queue_length", "Queue length", None, "mdi:tray-full"),
             ("pending", "Pending requests", None, "mdi:timer-sand"),
             ("last_rtt_ms", "Round-trip time", "ms", "mdi:timer-outline"),
@@ -349,6 +350,9 @@ class Bridge:
             if unit:
                 extra["unit_of_meas"] = unit
             add(comm, "sensor", f"stats_{key}", name, **extra)
+        add(comm, "sensor", "stats_last_reset_suspected", "Last reset suspected",
+            stat_t=self.t_state("stats"), val_tpl="{{ value_json.last_reset_suspected }}",
+            dev_cla="timestamp", ent_cat="diagnostic")
         add(comm, "sensor", "stats_last_response", "Last response",
             stat_t=self.t_state("stats"), val_tpl="{{ value_json.last_response }}",
             dev_cla="timestamp", ent_cat="diagnostic")

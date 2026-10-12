@@ -39,6 +39,8 @@ from marstek_api import ParseError, parse_datagram
 _LOG = get_logger("udp")
 
 ID_MODULO = 1000  # ids 0..999
+RESET_RTT_MS = 2000      # ES.SetMode slower than this (or timeout) -> device reset suspected
+RESET_DEDUP = 60.0       # s, one event may cause a timeout and a late answer -> count once
 SLOW_RTT_MS = 500 # answers slower than this are logged as INFO (device busy?)
 MAX_HOLD = 30.0   # s, queries are held back at most this long while regulating
 
@@ -82,6 +84,8 @@ class Stats:
     errors: int = 0
     parse_repairs: int = 0
     slow_responses: int = 0
+    resets_suspected: int = 0
+    last_reset_suspected: str | None = None
     last_rtt_ms: float | None = None
     last_response: str | None = None
     queue_length: int = 0
@@ -140,6 +144,7 @@ class UdpClient:
         self._wakeup = asyncio.Event()
         self.hold_queries: Callable[[], bool] = lambda: False
         self._held_since: float | None = None
+        self._last_reset_at: float | None = None
         self._transport: asyncio.DatagramTransport | None = None
         self._worker: asyncio.Task | None = None
 
@@ -247,8 +252,26 @@ class UdpClient:
             self.stats.timeouts += 1
             _LOG.warning("Timeout  #%03d %s after %.1fs (fire mode, keeping previous data)",
                          p.req_id, p.method, self.settings.timeout)
+            self._reset_suspect(p, f"timeout after {self.settings.timeout:.1f} s")
             p.future.set_exception(RequestTimeout(p.method))
             self._update_counts()
+
+    def _reset_suspect(self, p: Pending, what: str) -> None:
+        """ES.SetMode answered very late / not at all: the device is probably running
+        its internal sensor test or resetting. Logged and counted (no action)."""
+        if p.method != "ES.SetMode":
+            return
+        now = time.monotonic()
+        if self._last_reset_at is not None and now - self._last_reset_at < RESET_DEDUP:
+            return
+        since = None if self._last_reset_at is None else now - self._last_reset_at
+        self._last_reset_at = now
+        self.stats.resets_suspected += 1
+        self.stats.last_reset_suspected = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        _LOG.warning("Device reset suspected: #%03d ES.SetMode %s - %s since the last one "
+                     "(total %d)", p.req_id, what,
+                     "-" if since is None else f"{since / 60:.1f} min", self.stats.resets_suspected)
+        self._update_counts()
 
     @property
     def queue_length(self) -> int:
@@ -300,6 +323,7 @@ class UdpClient:
                 except asyncio.TimeoutError:
                     self.stats.timeouts += 1
                     _LOG.warning("Timeout  #%03d %s after %.1fs", p.req_id, p.method, s.timeout)
+                    self._reset_suspect(p, f"timeout after {s.timeout:.1f} s")
                 except Exception:  # noqa: BLE001  device error -> answered, stop
                     break
             else:
@@ -343,6 +367,8 @@ class UdpClient:
         self.stats.last_rtt_ms = round(rtt, 1)
         self._on_alive()
 
+        if rtt > RESET_RTT_MS and p.answers == 1:
+            self._reset_suspect(p, f"answered after {rtt:.0f} ms")
         if rtt > SLOW_RTT_MS and p.answers == 1:
             self.stats.slow_responses += 1
             _LOG.info("Slow     #%03d %s answered in %.0f ms (normally < 100 ms)", rid, p.method, rtt)
