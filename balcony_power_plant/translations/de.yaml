@@ -150,6 +150,12 @@ configuration:
   lf_jitter_interval:
     name: "Jitter-Intervall"
     description: "s zwischen zwei Jitter-Tests (unabhängig vom Keepalive)."
+  lf_device_test_guard:
+    name: "Geräte-Test-Schutz"
+    description: "Regelung einfrieren, während das Gerät seinen eigenen Sensortest / Reset fährt (erkannt an sehr langsamer oder fehlender ES.SetMode-Antwort)."
+  lf_device_test_hold:
+    name: "Geräte-Test Haltezeit"
+    description: "s, maximale Einfrierzeit des Geräte-Test-Schutzes."
   log_level:
     name: "Log-Level"
     description: "trace, debug, info, warning, error"

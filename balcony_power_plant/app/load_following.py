@@ -55,7 +55,8 @@ LIMITED = "LIMITED"            # import above deadband but setpoint = upper limi
 SENSOR_LOST = "SENSOR_LOST"
 HOLD = "HOLD"                  # device dropout suspected: hold setpoint, wait for recovery
 JITTER = "JITTER"              # keep-alive jitter test running
-STATES = [OFF, WAITING, REGULATING, IDLE, LIMITED, HOLD, JITTER, SENSOR_LOST]
+DEVICE_TEST = "DEVICE_TEST"    # device runs its own sensor test / reset: regulation frozen
+STATES = [OFF, WAITING, REGULATING, IDLE, LIMITED, HOLD, JITTER, DEVICE_TEST, SENSOR_LOST]
 
 EXPORT_CALCULATED = "Calculated"
 EXPORT_MINIMUM = "Minimum"
@@ -66,6 +67,11 @@ DROPOUT_UNDERSHOOT = 15  # W, the jump may be this much more BELOW the setpoint 
 DROPOUT_MIN_REF = 3.0    # s of settled grid values needed as reference before a jump
 JITTER_ZERO_MAX = 100    # W, jitter at 0 W: compensate the import (minus target), max. 100 W
 OBSOLETE_ENTITIES = [("number", "lf_jitter_zero_w")]   # removed from HA on discovery
+TEST_DEVIATION_WAIT = 30.0  # s, device test: no grid deviation within this time -> false alarm
+TEST_EXPORT_MARGIN = 30.0  # W, export larger than setpoint + this is impossible by load
+                           # changes -> the device feeds in on its own (sensor test / reset)
+TEST_REVERT_WINDOW = 15.0  # s, guard starts this soon after our own change -> revert it
+TEST_STABLE = 5.0        # s, device test: grid back at the pre-test level this long -> end
 CD_TIME_GUARD = 10.0     # s, quiet HOLD: send a keep-alive anyway if cd_time ends sooner
 CANDIDATE_TIME = 6.0     # s to confirm a partial jump as dropout (output ramping down)
 REFERENCE_RETRY = 10     # s between reference reads (ES.GetStatus) at takeover
@@ -94,6 +100,7 @@ NUMBERS: dict[str, tuple[str, float, float, float, str | None, float]] = {
     "lf_dropout_hold":          ("Dropout hold time", 5, 120, 1, "s", 30),
     "lf_jitter_pct":            ("Jitter amount", 5, 90, 5, "%", 50),
     "lf_jitter_interval":       ("Jitter interval", 30, 3600, 10, "s", 120),
+    "lf_device_test_hold":      ("Device test hold time", 30, 300, 5, "s", 75),
 }
 
 # option key -> (HA name, default)
@@ -101,6 +108,7 @@ SWITCHES: dict[str, tuple[str, bool]] = {
     "lf_dropout_detect": ("Dropout detection", True),
     "lf_dropout_resend": ("Dropout resend setpoint", True),
     "lf_jitter": ("Keepalive jitter", False),
+    "lf_device_test_guard": ("Device test guard", True),
 }
 
 
@@ -124,7 +132,14 @@ class LoadFollower:
                          "suspected_dropouts": 0, "sensor_values": 0, "invalid_values": 0,
                          "dropouts": 0, "dropout_recoveries": 0, "dropout_timeouts": 0,
                          "jitter_probes": 0, "jitter_followed": 0, "jitter_not_followed": 0,
-                         "jitter_inconclusive": 0}
+                         "jitter_inconclusive": 0, "device_tests": 0}
+        # device test guard
+        self.test_start: float | None = None
+        self.test_level: float | None = None
+        self._test_deviated = False
+        self._test_back_since: float | None = None
+        self.last_device_test_s: float | None = None
+        self._sp_before_change: int | None = None    # setpoint before the last change
         self.jitter: dict[str, Any] | None = None    # running keep-alive jitter test
         self._last_jitter = 0.0                      # monotonic start of the last jitter
         # dropout hold
@@ -213,6 +228,7 @@ class LoadFollower:
         self._check, self._strikes = None, 0
         self.hold_start = self.hold_level = None
         self.jitter = None
+        self.test_start = None
         self._last_jitter = time.monotonic()        # first jitter one interval after start
         self.state = WAITING if self.enabled else OFF
         self._dirty = True
@@ -386,6 +402,10 @@ class LoadFollower:
             self._set_state(REGULATING)
             return
 
+        # --- device runs its own sensor test / reset: freeze -------------------
+        if self.test_start is not None and self._device_test_step(now):
+            return
+
         # --- upper limit lowered (Passive power from HA) ------------------
         cap = self.cap
         if self.jitter is not None and self.jitter["base"] > cap:
@@ -418,6 +438,15 @@ class LoadFollower:
                 return
         elif self._detect_dropout(now, settle_end):
             return
+
+        # --- export larger than our setpoint: the device acts on its own -------
+        latest_raw = self.samples[-1][1]
+        if (self.sw("lf_device_test_guard") and self.test_start is None
+                and latest_raw < -(self.setpoint + TEST_EXPORT_MARGIN)):
+            self.device_test_start(f"export {latest_raw:+.0f} W larger than setpoint "
+                                   f"{self.setpoint} W")
+            if self.test_start is not None:
+                return
 
         # --- regulate down (export side, fast) ----------------------------
         if self.avg_down is not None and self.avg_down < lower:
@@ -465,6 +494,75 @@ class LoadFollower:
             self.target_sp = self.load_est - target
         self._set_state(IDLE if self.avg_up is not None else REGULATING)
         self._keepalive(now)
+
+    # --------------------------------------------------- device test guard
+    def device_test_start(self, reason: str) -> None:
+        """Called when the device answers ES.SetMode very late / not at all: it is
+        about to run its own sensor test (±several hundred W) or to reset. Our
+        commands are ignored then anyway and reacting would only cause a step
+        afterwards (e.g. 0 W -> import). So: freeze everything until it is over."""
+        if (not self.enabled or not self.sw("lf_device_test_guard") or self.setpoint is None
+                or not self.samples):
+            return
+        now = time.monotonic()
+        if self.test_start is not None:
+            return
+        t_last = self.samples[-1][0]
+        level = self._integrate(t_last - 12.0, t_last - 2.0)   # before the slow answer
+        self.test_start = now
+        self.test_level = level if level is not None else self.samples[-1][1]
+        self._test_deviated = False
+        self._test_back_since = None
+        self.jitter = None
+        self.hold_start = self.hold_level = None
+        self._candidate_until = None
+        self.counters["device_tests"] += 1
+        if (now - self.last_change < TEST_REVERT_WINDOW and self._sp_before_change is not None
+                and self._sp_before_change != self.setpoint):
+            # our last change was a reaction to the test itself -> undo it
+            _LOG.info("Device test guard: reverting our last change %s W -> %s W",
+                      self.setpoint, self._sp_before_change)
+            self._send(int(self._sp_before_change), "device test revert", change=False)
+        _LOG.warning("Device test guard: %s - regulation frozen (grid level before %+.0f W, "
+                     "setpoint %s W, max. %.0f s)", reason, self.test_level, self.setpoint,
+                     self.o("lf_device_test_hold"))
+        self._set_state(DEVICE_TEST)
+        self._dirty = True
+
+    def _device_test_step(self, now: float) -> bool:
+        """Returns True while the device test is running (nothing is regulated)."""
+        assert self.test_start is not None and self.test_level is not None
+        elapsed = now - self.test_start
+        latest = self.samples[-1][1]
+        tol = max(25.0, self._tolerance())
+        back = abs(latest - self.test_level) <= tol
+        if not back:
+            self._test_deviated = True
+            self._test_back_since = None
+        elif self._test_back_since is None:
+            self._test_back_since = now
+        end_reason = None
+        if self._test_deviated and self._test_back_since is not None \
+                and now - self._test_back_since >= TEST_STABLE:
+            end_reason = "grid back at the level before"
+        elif not self._test_deviated and elapsed >= TEST_DEVIATION_WAIT:
+            end_reason = "no deviation (false alarm)"
+        elif elapsed >= self.o("lf_device_test_hold"):
+            end_reason = "hold time over"
+        if end_reason:
+            self.last_device_test_s = round(elapsed, 1)
+            _LOG.info("Device test over after %.0f s (%s, grid %+.0f W) - regulating again",
+                      elapsed, end_reason, latest)
+            self.test_start = self.test_level = None
+            self.last_change = now                # settle + fresh averaging windows
+            self._set_state(REGULATING)
+            self._dirty = True
+            return True
+        self._set_state(DEVICE_TEST)
+        if now - self.last_send >= self.o("lf_cd_time") - CD_TIME_GUARD and self.setpoint is not None:
+            self.counters["keepalives"] += 1
+            self._send(self.setpoint, "keepalive (cd_time guard)", change=False)
+        return True
 
     # ---------------------------------------------------- keep-alive jitter
     def _start_jitter(self, now: float) -> None:
@@ -693,6 +791,8 @@ class LoadFollower:
         self.setpoint = power
         self.last_send = now
         if change:
+            if old != power:
+                self._sp_before_change = old
             self.last_change = now
             if count:
                 self.counters["commands"] += 1
@@ -770,6 +870,9 @@ class LoadFollower:
             "last_dropout_duration": self.last_dropout_s,
             "dropout_interval": self.dropout_interval,
             "jitter_phase": None if self.jitter is None else self.jitter["phase"],
+            "device_test_for": (None if self.test_start is None
+                                else round(time.monotonic() - self.test_start)),
+            "last_device_test_duration": self.last_device_test_s,
             "jitter_in": (None if not self.sw("lf_jitter") or self.setpoint is None else
                           max(0, round(self.o("lf_jitter_interval")
                                        - (time.monotonic() - self._last_jitter)))),

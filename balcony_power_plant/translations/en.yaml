@@ -150,6 +150,12 @@ configuration:
   lf_jitter_interval:
     name: "Jitter interval"
     description: "s between two jitter tests (independent of the keep-alive)."
+  lf_device_test_guard:
+    name: "Device test guard"
+    description: "Freeze the regulation while the device runs its own sensor test / reset (detected by a very slow or missing ES.SetMode answer)."
+  lf_device_test_hold:
+    name: "Device test hold time"
+    description: "s, maximum freeze time of the device test guard."
   log_level:
     name: "Log level"
     description: "trace, debug, info, warning, error"

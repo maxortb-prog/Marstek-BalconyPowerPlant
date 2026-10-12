@@ -145,6 +145,7 @@ class UdpClient:
         self.hold_queries: Callable[[], bool] = lambda: False
         self._held_since: float | None = None
         self._last_reset_at: float | None = None
+        self.on_reset_suspect: Callable[[str], None] = lambda reason: None
         self._transport: asyncio.DatagramTransport | None = None
         self._worker: asyncio.Task | None = None
 
@@ -272,6 +273,10 @@ class UdpClient:
                      "(total %d)", p.req_id, what,
                      "-" if since is None else f"{since / 60:.1f} min", self.stats.resets_suspected)
         self._update_counts()
+        try:
+            self.on_reset_suspect(f"ES.SetMode {what}")
+        except Exception:  # noqa: BLE001
+            _LOG.exception("Reset-suspect handler failed")
 
     @property
     def queue_length(self) -> int:

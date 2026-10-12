@@ -276,6 +276,26 @@ reset suspected“ mit dem Abstand zum letzten Mal geloggt und gezählt (*Resets
 *Last reset suspected* im Gerät Communication). Es wird nichts unternommen – die wieder
 eingeschaltete LED bleibt dein sichtbares Zeichen für einen Geräte-Reset.
 
+### Device test guard (Geräte-Test-Schutz)
+
+Das Gerät fährt sporadisch einen eigenen Sensortest / Reset (beobachtet: ES.SetMode ohne
+Antwort oder nach ~3 s, dann einige hundert W zusätzliche Einspeisung und/oder Laden, ~60 s
+insgesamt, die LED kann wieder angehen). Darauf zu reagieren erzeugt nur danach eine Stufe
+(z. B. unser 0 W → Netzbezug).
+
+**Auslöser** (Schalter *Device test guard*, Standard an):
+- ES.SetMode-Antwort über 2 s oder Timeout („Device reset suspected“), oder
+- **Einspeisung größer als der aktive Sollwert + 30 W** – durch Laständerungen unmöglich (das
+  Netz kann höchstens auf −Sollwert fallen), das Gerät speist also auf eigene Faust ein.
+
+**Zustand DEVICE_TEST**: alles eingefroren – keine Regelung (auch keine Reaktion auf
+Einspeisung), keine Befehle (außer dem cd_time-Schutz). Haben wir in den letzten 15 s den
+Sollwert geändert (eine Reaktion auf den Test selbst), wird der vorherige Wert einmal
+wiederhergestellt.
+**Ende**: Netz 5 s wieder auf dem Niveau davor, keine Abweichung innerhalb 30 s (Fehlalarm)
+oder *Device test hold time* (75 s). Danach Einschwingen + neue Mittelwerte.
+Diagnose: *Device tests*, *Device test elapsed*, *Last device test duration*.
+
 ### Keepalive-Jitter (Testfunktion)
 
 These: Die geräteeigene Regelung (das Gerät ist selbst auch mit dem Shelly gekoppelt)
@@ -309,6 +329,7 @@ interval* sieht man, ob sich der Takt von ~123 s ändert.
 | IDLE | Netzleistung im Totband (oder Sollwert 0 W) |
 | LIMITED | mehr Bezug, aber Sollwert an der Grenze |
 | JITTER | Keepalive-Jitter-Test läuft |
+| DEVICE_TEST | Gerät fährt eigenen Sensortest / Reset, Regelung eingefroren |
 | HOLD | Dropout erkannt, Sollwert wird gehalten, Warten auf Wiederkehr |
 | SENSOR_LOST | kein Sensorwert seit *Sensor timeout* |
 

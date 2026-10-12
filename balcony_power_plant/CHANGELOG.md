@@ -3,6 +3,17 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.9] – 2026-10-12
+
+### Added / Neu
+- **Device test guard**: freezes the regulation while the device runs its own sensor test /
+  reset. Triggered by a slow/missing ES.SetMode answer or by an export larger than the
+  active setpoint + 30 W (physically impossible by load changes). Reverts our own change of
+  the last 15 s, ends when the grid is back at the previous level (max. *Device test hold
+  time*, 75 s). New state DEVICE_TEST, switch, number and diagnostics.
+  / Regelung einfrieren, während das Gerät seinen eigenen Sensortest / Reset fährt.
+- Simulator: `--test-at`, `--test-every` (device sensor test as observed on 2026-10-12 16:20)
+
 ## [0.3.8] – 2026-10-12
 
 ### Added / Neu

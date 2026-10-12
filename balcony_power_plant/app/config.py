@@ -79,6 +79,8 @@ DEFAULTS: dict[str, Any] = {
     "lf_jitter": False,
     "lf_jitter_pct": 50,
     "lf_jitter_interval": 120,
+    "lf_device_test_guard": True,
+    "lf_device_test_hold": 75,
     "log_level": "info",
 }
 

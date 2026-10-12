@@ -273,6 +273,24 @@ regulator settles and averages fresh before regulating (no overshoot on wake-up)
 suspected*, *Last reset suspected* in device Communication). No action is taken – the LED
 switching back on stays your visible sign of a device reset.
 
+### Device test guard
+
+The device sporadically runs its own sensor test / reset (observed: ES.SetMode not answered
+or after ~3 s, then several hundred W extra feed-in and/or charging, ~60 s in total, LED may
+come back on). Reacting to it only causes a step afterwards (e.g. our 0 W → import).
+
+**Triggers** (switch *Device test guard*, default on):
+- ES.SetMode answer slower than 2 s or timeout ("Device reset suspected"), or
+- **export larger than the active setpoint + 30 W** – impossible by load changes (the grid can
+  drop at most to −setpoint), so the device feeds in on its own.
+
+**State DEVICE_TEST**: everything is frozen – no regulation (also no export reaction), no
+commands (except the cd_time guard). If we changed the setpoint within the last 15 s (a
+reaction to the test itself), the previous setpoint is restored once.
+**End**: grid back at the level before for 5 s, no deviation within 30 s (false alarm), or
+*Device test hold time* (75 s). Then settle + fresh averaging.
+Diagnostics: *Device tests*, *Device test elapsed*, *Last device test duration*.
+
 ### Keepalive jitter (test function)
 
 Hypothesis: the device's own regulation (it is also coupled to the Shelly) might
@@ -307,6 +325,7 @@ Counters: *Jitter probes / followed / not followed / inconclusive*. Watch
 | IDLE | grid power inside the deadband (or setpoint 0 W) |
 | LIMITED | more import, but the setpoint is at the limit |
 | JITTER | keep-alive jitter test running |
+| DEVICE_TEST | device runs its own sensor test / reset, regulation frozen |
 | HOLD | dropout detected, holding the setpoint and waiting for recovery |
 | SENSOR_LOST | no sensor value for *Sensor timeout* |
 

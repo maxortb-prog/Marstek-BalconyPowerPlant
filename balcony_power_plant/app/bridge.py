@@ -92,6 +92,7 @@ class Bridge:
         )
         self.lf = LoadFollower(self)
         self.udp.hold_queries = lambda: self.lf.regulating
+        self.udp.on_reset_suspect = self.lf.device_test_start
 
     # ================================================================ helpers
     def _comm_from_options(self) -> CommSettings:
@@ -416,6 +417,11 @@ class Bridge:
             stat_cla="measurement", ic="mdi:timer-sync-outline")
         add("sensor", "lf_jitter_in", "Next jitter in", stat_t=st,
             val_tpl="{{ value_json.jitter_in }}", unit_of_meas="s", ic="mdi:sine-wave")
+        add("sensor", "lf_device_test_for", "Device test elapsed", stat_t=st,
+            val_tpl="{{ value_json.device_test_for }}", unit_of_meas="s", ic="mdi:test-tube")
+        add("sensor", "lf_last_device_test_duration", "Last device test duration", stat_t=st,
+            val_tpl="{{ value_json.last_device_test_duration }}", unit_of_meas="s",
+            ic="mdi:timer-sand-complete")
         add("sensor", "lf_keepalive_in", "Keepalive in", stat_t=st,
             val_tpl="{{ value_json.keepalive_in }}", unit_of_meas="s",
             ic="mdi:timer-refresh-outline")
@@ -433,6 +439,7 @@ class Bridge:
             ("jitter_followed", "Jitter followed", "mdi:check-circle-outline"),
             ("jitter_not_followed", "Jitter not followed", "mdi:close-circle-outline"),
             ("jitter_inconclusive", "Jitter inconclusive", "mdi:help-circle-outline"),
+            ("device_tests", "Device tests", "mdi:test-tube"),
         ):
             add("sensor", f"lf_{key}", name, stat_t=st,
                 val_tpl=f"{{{{ value_json.{key} }}}}", stat_cla="total_increasing",

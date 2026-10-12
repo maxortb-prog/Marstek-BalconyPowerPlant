@@ -24,6 +24,9 @@ Household / grid meter simulation for load following (Lastfolgeregelung):
     --dropout-at 90  s, device stops feeding in ...
     --dropout-for 40 s, ... for this long (0 = until the next setpoint change)
     --dropout-residual 12  W the device still delivers during a dropout (not exactly 0)
+    --test-at 60 [--test-every 600]   device sensor test like observed on 2026-10-12 16:20:
+                     36 s slow/no answers, +360 W extra output for 7 s after 12 s,
+                     then 0 W for 37 s (setpoints ignored), then back to the setpoint
     --dropout-every 120  repeat the dropout every N s (needs --dropout-at and --dropout-for)
     --auto-output 250   W the device feeds in while in Auto mode (e.g. after boot)
     --hang-after 6 --hang-for 40   stop answering after 6 answers for 40 s (init test)
@@ -55,7 +58,22 @@ class VenusA:
     auto_output = 0.0
     dropout_residual = 0.0
 
+    test_t0 = 0.0
+
+    def in_test(self) -> float | None:
+        if self.test_t0 and 0 <= time.time() - self.test_t0 < 56:
+            return time.time() - self.test_t0
+        return None
+
     def target_output(self) -> float:
+        tt = self.in_test()
+        if tt is not None:
+            base = float(max(0, self.passive_power)) if self.mode == "Passive" else 0.0
+            if tt < 12:
+                return base
+            if tt < 19:
+                return base + 360.0
+            return 0.0
         if self.mode == "Passive" and time.time() > self.passive_until:
             self.mode = "Auto"                 # cd_time expired -> back to Auto
             print("   cd_time expired -> Auto", flush=True)
@@ -145,6 +163,12 @@ class Proto(asyncio.DatagramProtocol):
         asyncio.ensure_future(self.process(data, addr))
 
     async def process(self, data: bytes, addr) -> None:
+        tt = self.dev.in_test()
+        if tt is not None and tt < 36:
+            if tt < 5:
+                print("   (device test: not answering)", flush=True)
+                return
+            await asyncio.sleep(2.8)
         if self.args.serial:
             async with self.lock:
                 await self._process(data, addr)
@@ -209,6 +233,10 @@ async def household(args: argparse.Namespace, dev: VenusA) -> None:
         while True:
             await asyncio.sleep(1.0)
             t = time.time() - t0
+            if args.test_at and t >= args.test_at:
+                dev.test_t0 = time.time()
+                print(f"!! t={t:.0f}s device sensor test starts", flush=True)
+                args.test_at = args.test_at + args.test_every if args.test_every else 0
             if args.dropout_at and not dropout_done and t >= args.dropout_at:
                 dev.dropped = True
                 if args.dropout_every:
@@ -252,6 +280,8 @@ async def main() -> None:
     ap.add_argument("--auto-output", type=float, default=0.0)
     ap.add_argument("--dropout-every", type=float, default=0.0)
     ap.add_argument("--dropout-residual", type=float, default=0.0)
+    ap.add_argument("--test-at", type=float, default=0.0)
+    ap.add_argument("--test-every", type=float, default=0.0)
     ap.add_argument("--hang-after", type=int, default=0)
     ap.add_argument("--hang-for", type=float, default=40.0)
     args = ap.parse_args()
