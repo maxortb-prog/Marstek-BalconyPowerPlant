@@ -3,6 +3,17 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.10] – 2026-10-13
+
+### Changed / Geändert
+- Settle time **scales with the setpoint step**: *Settle time* + *Settle time per 100 W*
+  (new, default 5 s) × |change| / 100 – the device ramps (~15–20 W/s), big steps were
+  over-corrected (e.g. 155 -> 235 -> 283 W, then export -119 W). Also after a hold-timeout
+  wake-up (ramp 0 -> setpoint). / Einschwingzeit skaliert mit der Sprunghöhe.
+- Export protection stays active while the device ramps up after an up step (only
+  regulating up waits). / Einspeiseschutz auch während der Rampe nach einem Hochregel-Schritt.
+- Simulator: `--ramp` (W/s ramp limit of the inverter output)
+
 ## [0.3.9] – 2026-10-12
 
 ### Added / Neu

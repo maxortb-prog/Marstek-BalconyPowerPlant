@@ -210,7 +210,11 @@ setpoint       = estimated load − target grid power        limited to [0 | min
 - A setpoint below **Minimum power** (50 W) is sent as **0 W**.
 - **Export reaction**: *Calculated* (default) jumps directly to the calculated
   setpoint, *Minimum* drops to the minimum power and regulates up again.
-- After every setpoint change the regulator waits **Settle time** (5 s).
+- After every setpoint change the regulator waits the **settle time**, which scales with the
+  step because the device ramps (observed ~15–20 W/s):
+  `Settle time + Settle time per 100 W × |change| / 100` (default 5 s + 5 s/100 W → 10 W: 5.5 s,
+  100 W: 10 s, 300 W: 20 s). Only regulating **up** waits – an export after an up step can only
+  come from a real load drop and is corrected immediately, even while the device still ramps.
 - **Keep-alive**: if nothing has to be changed, the same setpoint is re-sent at
   **Keepalive at** (50 %) of **Countdown cd_time** (120 s).
 - **Upper limit** = *Passive power* (device Control). Your SOC dependent automation

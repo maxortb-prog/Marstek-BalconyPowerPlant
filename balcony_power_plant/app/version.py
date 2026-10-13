@@ -1,3 +1,3 @@
 """Add-on version. Keep in sync with config.yaml / CHANGELOG.md."""
 
-VERSION = "0.3.9"
+VERSION = "0.3.10"

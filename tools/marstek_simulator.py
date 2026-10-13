@@ -21,6 +21,7 @@ Household / grid meter simulation for load following (Lastfolgeregelung):
     --load-steps "0:300,60:650,120:180,180:30"   load profile  t[s]:W  (repeats)
     --noise 5        +/- W random noise on the load
     --tau 1.5        s, time constant of the inverter output
+    --ramp 15        W/s, max. ramp rate of the inverter output (0 = unlimited)
     --dropout-at 90  s, device stops feeding in ...
     --dropout-for 40 s, ... for this long (0 = until the next setpoint change)
     --dropout-residual 12  W the device still delivers during a dropout (not exactly 0)
@@ -251,7 +252,10 @@ async def household(args: argparse.Namespace, dev: VenusA) -> None:
             load = [w for ts, w in steps if ts <= t % period][-1]
             load += random.uniform(-args.noise, args.noise)
             target = dev.target_output()
-            dev.output += (target - dev.output) * (1 - pow(2.718281828, -1.0 / args.tau))
+            step = (target - dev.output) * (1 - pow(2.718281828, -1.0 / args.tau))
+            if args.ramp:
+                step = max(-args.ramp, min(args.ramp, step))
+            dev.output += step
             grid = load - dev.output
             await c.publish(args.grid_topic, f"{grid:.0f}")
             print(f"   t={t:5.0f}s load={load:6.0f} setpoint={dev.passive_power if dev.mode == 'Passive' else '-':>5} "
@@ -275,6 +279,7 @@ async def main() -> None:
     ap.add_argument("--load-steps", default="0:300")
     ap.add_argument("--noise", type=float, default=5.0)
     ap.add_argument("--tau", type=float, default=1.5)
+    ap.add_argument("--ramp", type=float, default=0.0)
     ap.add_argument("--dropout-at", type=float, default=0.0)
     ap.add_argument("--dropout-for", type=float, default=0.0)
     ap.add_argument("--auto-output", type=float, default=0.0)

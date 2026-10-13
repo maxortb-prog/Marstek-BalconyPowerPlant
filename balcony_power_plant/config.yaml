@@ -1,5 +1,5 @@
 name: BalconyPowerPlant
-version: "0.3.9"
+version: "0.3.10"
 slug: balcony_power_plant
 description: >-
   Local UDP bridge between a Marstek Venus battery (Open API Rev 2.0)
@@ -60,6 +60,7 @@ options:
   lf_min_power: 50
   lf_ramp_step: 100
   lf_settle_time: 5
+  lf_settle_per_100w: 5
   lf_avg_up: 12
   lf_avg_down: 5
   lf_cd_time: 120
@@ -116,6 +117,7 @@ schema:
   lf_min_power: int(0,400)
   lf_ramp_step: int(10,1200)
   lf_settle_time: int(1,60)
+  lf_settle_per_100w: float(0,30)
   lf_avg_up: int(1,60)
   lf_avg_down: int(1,60)
   lf_cd_time: int(30,3600)

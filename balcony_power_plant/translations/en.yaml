@@ -111,6 +111,9 @@ configuration:
   lf_settle_time:
     name: "Settle time"
     description: "s, wait after each setpoint change."
+  lf_settle_per_100w:
+    name: "Settle time per 100 W"
+    description: "s added per 100 W of setpoint change (the device ramps, big steps take longer)."
   lf_avg_up:
     name: "Averaging time regulate up"
     description: "s, average of the grid power for regulating up."

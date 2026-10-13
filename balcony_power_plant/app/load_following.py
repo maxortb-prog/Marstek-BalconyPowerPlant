@@ -90,6 +90,7 @@ NUMBERS: dict[str, tuple[str, float, float, float, str | None, float]] = {
     "lf_min_power":       ("Minimum power", 0, 400, 5, "W", 50),
     "lf_ramp_step":       ("Ramp up step", 10, 1200, 10, "W", 100),
     "lf_settle_time":     ("Settle time", 1, 60, 1, "s", 5),
+    "lf_settle_per_100w": ("Settle time per 100 W", 0, 30, 0.5, "s", 5),
     "lf_avg_up":          ("Averaging time regulate up", 1, 60, 1, "s", 12),
     "lf_avg_down":        ("Averaging time regulate down", 1, 60, 1, "s", 5),
     "lf_cd_time":         ("Countdown cd_time", 30, 3600, 10, "s", 120),
@@ -121,6 +122,8 @@ class LoadFollower:
         self.setpoint: int | None = None        # last sent setpoint (trusted)
         self.last_change: float = 0.0           # monotonic time of last setpoint change
         self.last_send: float = 0.0             # monotonic time of last command (incl. keep-alive)
+        self.settle_until: float = 0.0          # device ramps until then (scales with the step)
+        self._last_dir = 0                      # direction of the last setpoint change (+1/-1)
         self.last_reason = "-"
         self.last_cmd_ts: str | None = None
         self.avg_up: float | None = None
@@ -189,7 +192,7 @@ class LoadFollower:
     def regulating(self) -> bool:
         """True while a new setpoint is settling -> queries are held back."""
         return (self.enabled and self.setpoint is not None
-                and time.monotonic() < self.last_change + self.o("lf_settle_time"))
+                and time.monotonic() < self.settle_until)
 
     # ----------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -419,9 +422,13 @@ class LoadFollower:
         if self.jitter is not None and self._jitter_step(now):
             return
 
-        settle_end = self.last_change + self.o("lf_settle_time")
+        settle_end = self.settle_until
         self._plausibility(now, settle_end)
         if now < settle_end:
+            # still ramping: no regulating up - but after an UP step an export can only
+            # come from a real load drop -> react immediately (export protection)
+            if self._last_dir > 0 and self._settle_export(now):
+                return
             self._set_state(REGULATING)
             self._keepalive(now)
             return
@@ -555,6 +562,7 @@ class LoadFollower:
                       elapsed, end_reason, latest)
             self.test_start = self.test_level = None
             self.last_change = now                # settle + fresh averaging windows
+            self.settle_until = now + self.o("lf_settle_time")
             self._set_state(REGULATING)
             self._dirty = True
             return True
@@ -593,29 +601,31 @@ class LoadFollower:
         sign = "+" if direction > 0 else "-"
         self._send(base + direction * amount, f"jitter {sign}{amount} W", change=True,
                    count=False)
+        self.jitter["su"] = self.settle_until
 
     def _jitter_step(self, now: float) -> bool:
         """Advance the running jitter test. Returns True while it is running."""
         j = self.jitter
         assert j is not None
-        settle, avg = self.o("lf_settle_time"), self.o("lf_avg_up")
+        avg = self.o("lf_avg_up")
+        su = j.get("su", j["t"] + self.o("lf_settle_time"))     # end of settling this phase
         # export protection stays active (fast average)
         avg_down = self._integrate(now - self.o("lf_avg_down"), now)
-        if (j["phase"] == "down" and now >= j["t"] + settle and avg_down is not None
+        if (j["phase"] == "down" and now >= su and avg_down is not None
                 and avg_down < self.o("lf_deadband_lower")):
             _LOG.warning("Export during jitter (%+.0f W) - jitter aborted", avg_down)
             self.jitter = None
             return False
         if j["phase"] == "down":
-            if now >= j["t"] + settle and self._detect_dropout(now, j["t"] + settle):
+            if now >= su and self._detect_dropout(now, su):
                 _LOG.info("Jitter aborted - dropout during jitter")
                 self.counters["jitter_inconclusive"] += 1
                 self.jitter = None
                 return True
-            if now < j["t"] + settle + avg:
+            if now < su + avg:
                 self._set_state(JITTER)
                 return True
-            measured = self._integrate(j["t"] + settle, now)
+            measured = self._integrate(su, now)
             # expected grid change: +amount (output lowered) or -amount (output raised)
             rise = ((measured or 0.0) - j["before"]) * (-j["dir"])
             amt = j["amount"]
@@ -632,14 +642,15 @@ class LoadFollower:
                 measured or 0.0, -j["dir"] * amt, (measured or 0.0) - j["before"], result)
             j["phase"], j["t"] = "return", now
             self._send(j["base"], "jitter return", change=True, count=False)
+            j["su"] = self.settle_until
             self._set_state(JITTER)
             return True
         # phase "return": wait for the settle time, then normal operation
-        if now < j["t"] + settle:
+        if now < su:
             self._set_state(JITTER)
             return True
         self.jitter = None
-        self.last_change = now - settle          # averaging windows restart now
+        self.settle_until = now                  # averaging windows restart now
         self._set_state(REGULATING)
         return True
 
@@ -716,6 +727,7 @@ class LoadFollower:
                       "" if self.sw("lf_dropout_resend") else " by itself (quiet hold)")
             self.hold_start = self.hold_level = None
             self.last_change = now            # settle + fresh averaging windows
+            self.settle_until = now + self.o("lf_settle_time")
             self._set_state(IDLE)
             self._dirty = True
             return True
@@ -732,6 +744,7 @@ class LoadFollower:
                 # -1 W: a changed value is more likely to be processed than an identical one
                 self._send(max(0, self.setpoint - 1), "hold timeout resend (-1 W)",
                            change=True, count=False)
+                self.settle_until = now + self.settle_for(self.setpoint)   # ramp 0 -> sp
                 self._set_state(REGULATING)
                 return True
             return False
@@ -747,6 +760,32 @@ class LoadFollower:
             # quiet hold: only send if cd_time would otherwise expire
             self.counters["keepalives"] += 1
             self._send(self.setpoint, "keepalive (cd_time guard)", change=False)
+        return True
+
+    def settle_for(self, delta: float) -> float:
+        """Settle time for a setpoint step: the device ramps, bigger steps take longer."""
+        return self.o("lf_settle_time") + self.o("lf_settle_per_100w") * abs(delta) / 100.0
+
+    def _settle_export(self, now: float) -> bool:
+        """Export while the device is still ramping up after an UP step."""
+        start = max(now - self.o("lf_avg_down"), self.last_change + 1.0)
+        if now - start < 1.5:
+            return False
+        avg = self._integrate(start, now)
+        if avg is None or avg >= self.o("lf_deadband_lower"):
+            return False
+        grid = min(avg, self.samples[-1][1])
+        self.load_est = grid + (self.setpoint or 0)
+        self.target_sp = self.load_est - self.o("lf_target_power")
+        new = self._limit(int(round(self.target_sp)), int(self.o("lf_min_power")), self.cap)
+        if new >= (self.setpoint or 0):
+            return False
+        if grid < 0 and not self.in_export:
+            self.in_export = True
+            self.counters["export_events"] += 1
+        _LOG.warning("Export %+.0f W while ramping up - regulating down immediately", grid)
+        self._send(new, f"down {grid:+.0f} W (during ramp)", change=True)
+        self._set_state(REGULATING)
         return True
 
     @staticmethod
@@ -793,6 +832,9 @@ class LoadFollower:
         if change:
             if old != power:
                 self._sp_before_change = old
+            delta = power - (old or 0)
+            self._last_dir = (delta > 0) - (delta < 0)
+            self.settle_until = now + self.settle_for(delta)
             self.last_change = now
             if count:
                 self.counters["commands"] += 1

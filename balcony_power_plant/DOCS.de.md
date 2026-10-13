@@ -212,7 +212,11 @@ Sollwert        = geschätzte Last − Ziel-Netzleistung       begrenzt auf [0 |
 - Ein Sollwert unter **Minimum power** (50 W) wird als **0 W** gesendet.
 - **Export reaction**: *Calculated* (Standard) springt direkt auf den berechneten
   Sollwert, *Minimum* fällt auf die Minimum-Leistung und regelt wieder hoch.
-- Nach jeder Sollwertänderung wartet der Regler die **Settle time** (5 s).
+- Nach jeder Sollwertänderung wartet der Regler die **Einschwingzeit**, die mit der Sprunghöhe
+  wächst, weil das Gerät rampt (beobachtet ~15–20 W/s):
+  `Settle time + Settle time per 100 W × |Änderung| / 100` (Standard 5 s + 5 s/100 W → 10 W: 5,5 s,
+  100 W: 10 s, 300 W: 20 s). Nur das **Hochregeln** wartet – Einspeisung nach einem Hochregel-Schritt
+  kann nur von einem echten Lastabwurf kommen und wird sofort korrigiert, auch während der Rampe.
 - **Keepalive**: Muss nichts geändert werden, wird derselbe Sollwert bei
   **Keepalive at** (50 %) der **Countdown cd_time** (120 s) erneut gesendet.
 - **Obergrenze** = *Passive power* (Gerät Control). Deine SOC-abhängige Automation

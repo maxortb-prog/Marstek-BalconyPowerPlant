@@ -111,6 +111,9 @@ configuration:
   lf_settle_time:
     name: "Einschwingzeit"
     description: "s, Wartezeit nach jeder Sollwertänderung."
+  lf_settle_per_100w:
+    name: "Einschwingzeit pro 100 W"
+    description: "s zusätzlich je 100 W Sollwertänderung (das Gerät rampt, große Sprünge dauern länger)."
   lf_avg_up:
     name: "Mittelwert hochregeln"
     description: "s, Mittelwert der Netzleistung fürs Hochregeln."

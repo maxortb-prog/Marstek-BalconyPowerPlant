@@ -66,6 +66,7 @@ DEFAULTS: dict[str, Any] = {
     "lf_min_power": 50,
     "lf_ramp_step": 100,
     "lf_settle_time": 5,
+    "lf_settle_per_100w": 5,
     "lf_avg_up": 12,
     "lf_avg_down": 5,
     "lf_cd_time": 120,
