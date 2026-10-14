@@ -348,7 +348,7 @@ Einspeise-Ereignisse, vermutete Dropouts und Sensorwerte.
 |---|---|
 | `<base>/availability` | `online` / `offline` |
 | `<base>/state/<abfrage>` | JSON-Ergebnis (`device`, `wifi`, `ble`, `battery`, `pv`, `es_status`, `es_mode`) |
-| `<base>/state/communication` | `INIT` / `ON` / `FAIL` |
+| `<base>/state/communication` | `INIT` / `ON` / `FAIL` / `OFF` (Add-on gestoppt, oder vom Broker über den MQTT Last Will nach einem Absturz gesetzt) – solange `OFF`, sind alle anderen Entities nicht verfügbar |
 | `<base>/state/load_following` | load following state (JSON) |
 | `<base>/state/stats` | Statistik als JSON |
 | `<base>/control/<name>` | aktueller Wert eines Steuerelements |

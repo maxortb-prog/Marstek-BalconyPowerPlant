@@ -21,6 +21,18 @@ from version import VERSION
 MQTT_RECONNECT_INTERVAL = 5  # seconds
 
 
+async def announce_off(bridge, client: aiomqtt.Client, log) -> None:
+    """Graceful stop: Communication established -> OFF, availability -> offline."""
+    try:
+        await asyncio.wait_for(asyncio.shield(asyncio.gather(
+            client.publish(bridge.t_state("communication"), "OFF", qos=1, retain=True),
+            client.publish(bridge.t_avail, "offline", qos=1, retain=True),
+        )), 3)
+        log.info("Communication established: OFF (add-on stopped)")
+    except (aiomqtt.MqttError, asyncio.TimeoutError) as err:
+        log.warning("Could not report OFF on stop: %s", err)
+
+
 async def run() -> None:
     opts = OptionsStore()
     setup_logging(str(opts["log_level"]))
@@ -36,7 +48,8 @@ async def run() -> None:
     await bridge.udp.start()
     stats_task = asyncio.create_task(bridge.stats_loop(), name="stats")
 
-    will = aiomqtt.Will(bridge.t_avail, "offline", qos=0, retain=True)
+    # last will: the broker sets "Communication established" to OFF if we die
+    will = aiomqtt.Will(bridge.t_state("communication"), "OFF", qos=0, retain=True)
     try:
         while True:
             try:
@@ -51,8 +64,13 @@ async def run() -> None:
                 ) as client:
                     log.info("Connected to MQTT broker %s:%s", opts["mqtt_host"], opts["mqtt_port"])
                     await bridge.on_connected(client)
-                    async for message in client.messages:
-                        await bridge.handle_message(message)
+                    try:
+                        async for message in client.messages:
+                            await bridge.handle_message(message)
+                    except asyncio.CancelledError:
+                        # stopping: report OFF while the connection is still open
+                        await announce_off(bridge, client, log)
+                        raise
             except aiomqtt.MqttError as err:
                 bridge.on_disconnected()
                 log.error("MQTT connection to %s:%s lost/failed: %s - retry in %ds",
@@ -61,11 +79,6 @@ async def run() -> None:
     finally:
         stats_task.cancel()
         await bridge.stop()
-        if bridge.client is not None:
-            try:
-                await bridge.client.publish(bridge.t_avail, "offline", retain=True)
-            except aiomqtt.MqttError:
-                pass
         if opts.dirty:
             await opts.flush()
 

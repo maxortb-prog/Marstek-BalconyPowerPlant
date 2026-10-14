@@ -3,6 +3,19 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.11] – 2026-10-14
+
+### Added / Neu
+- *Communication established* shows **OFF** when the add-on is stopped; after a crash / kill
+  the broker sets OFF via the MQTT last will. All other entities become unavailable while
+  it is OFF. / Communication established zeigt OFF beim Stoppen bzw. per Last Will nach einem
+  Absturz.
+
+### Fixed / Behoben
+- On a regular stop `availability: offline` was never sent (the MQTT connection was already
+  closed); it is now published while the connection is still open.
+  / Beim regulären Stoppen wurde `offline` nie gesendet.
+
 ## [0.3.10] – 2026-10-13
 
 ### Changed / Geändert

@@ -51,7 +51,10 @@ INIT_ORDER = ("device", "wifi", "ble", "battery", "pv", "es_mode", "es_status") 
 STATS_INTERVAL = 1.0      # seconds, max. publish rate of the statistics
 LOG_LEVELS = ["trace", "debug", "info", "warning", "error"]
 
-COMM_INIT, COMM_ON, COMM_FAIL = "INIT", "ON", "FAIL"
+COMM_INIT, COMM_ON, COMM_FAIL, COMM_OFF = "INIT", "ON", "FAIL", "OFF"
+# All entities are available unless "Communication established" is OFF (add-on stopped,
+# or set by the broker via the MQTT last will after a crash / power loss).
+AVAILABILITY_TEMPLATE = "{{ 'offline' if value == 'OFF' else 'online' }}"
 
 
 def _truthy(value: Any) -> bool:
@@ -189,7 +192,8 @@ class Bridge:
         return {
             "name": name,
             "uniq_id": f"bpp_{key}",
-            "avty_t": self.t_avail,
+            "avty_t": self.t_state("communication"),
+            "avty_tpl": AVAILABILITY_TEMPLATE,
             "dev": dev,
             "o": {"name": DEVICE_NAME, "sw": VERSION,
                   "url": "https://github.com/maxortb-prog/Marstek-BalconyPowerPlant"},
@@ -274,7 +278,10 @@ class Bridge:
         # --- main device ----------------------------------------------------
         add(main, "sensor", "communication", "Communication established",
             stat_t=self.t_state("communication"), dev_cla="enum",
-            ops=[COMM_INIT, COMM_ON, COMM_FAIL], ic="mdi:lan-connect")
+            ops=[COMM_INIT, COMM_ON, COMM_FAIL, COMM_OFF], ic="mdi:lan-connect")
+        # this entity must stay visible to show OFF -> no availability for it
+        ents[-1][2].pop("avty_t", None)
+        ents[-1][2].pop("avty_tpl", None)
         add(main, "button", "reinitialize", "Reinitialize",
             cmd_t=self.t_cmd("reinitialize"), pl_prs="PRESS", ent_cat="config",
             ic="mdi:restart")

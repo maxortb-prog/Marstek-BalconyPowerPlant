@@ -344,7 +344,7 @@ suspected dropouts and sensor values.
 |---|---|
 | `<base>/availability` | `online` / `offline` |
 | `<base>/state/<query>` | JSON result (`device`, `wifi`, `ble`, `battery`, `pv`, `es_status`, `es_mode`) |
-| `<base>/state/communication` | `INIT` / `ON` / `FAIL` |
+| `<base>/state/communication` | `INIT` / `ON` / `FAIL` / `OFF` (add-on stopped, or set by the broker via the MQTT last will after a crash) – all other entities are unavailable while it is `OFF` |
 | `<base>/state/load_following` | load following state (JSON) |
 | `<base>/state/stats` | statistics JSON |
 | `<base>/control/<name>` | current value of a control |
