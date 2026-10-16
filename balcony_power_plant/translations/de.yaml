@@ -159,6 +159,9 @@ configuration:
   lf_device_test_hold:
     name: "Geräte-Test Haltezeit"
     description: "s, maximale Einfrierzeit des Geräte-Test-Schutzes."
+  lf_resend_interval:
+    name: "Wiederholintervall"
+    description: "s, während DEVICE_TEST und HOLD wird der Sollwert so oft erneut gesendet, bis das Gerät zurück ist (0 = aus)."
   log_level:
     name: "Log-Level"
     description: "trace, debug, info, warning, error"

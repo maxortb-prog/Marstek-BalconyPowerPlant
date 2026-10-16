@@ -28,6 +28,9 @@ Household / grid meter simulation for load following (Lastfolgeregelung):
     --test-at 60 [--test-every 600]   device sensor test like observed on 2026-10-12 16:20:
                      36 s slow/no answers, +360 W extra output for 7 s after 12 s,
                      then 0 W for 37 s (setpoints ignored), then back to the setpoint
+    --outage-at 60 [--outage-every 600 --outage-for 4]   output stage off as observed on
+                     2026-10-16 09:35: not reachable for N s, output stays 0 until the next
+                     ES.SetMode, then 10 s soft start
     --dropout-every 120  repeat the dropout every N s (needs --dropout-at and --dropout-for)
     --auto-output 250   W the device feeds in while in Auto mode (e.g. after boot)
     --hang-after 6 --hang-for 40   stop answering after 6 answers for 40 s (init test)
@@ -60,6 +63,9 @@ class VenusA:
     dropout_residual = 0.0
 
     test_t0 = 0.0
+    outage_until = 0.0     # not reachable until then
+    outage = False         # output off until the next SetMode
+    wake_at = 0.0          # soft start: output back at this time
 
     def in_test(self) -> float | None:
         if self.test_t0 and 0 <= time.time() - self.test_t0 < 56:
@@ -67,6 +73,8 @@ class VenusA:
         return None
 
     def target_output(self) -> float:
+        if self.outage or time.time() < self.wake_at:
+            return 0.0
         tt = self.in_test()
         if tt is not None:
             base = float(max(0, self.passive_power)) if self.mode == "Passive" else 0.0
@@ -122,6 +130,10 @@ class VenusA:
                     "input_energy": 3086320, "output_energy": 4487510}
         if method == "ES.SetMode":
             cfg = params.get("config", {})
+            if self.outage and time.time() >= self.outage_until:
+                self.outage = False
+                self.wake_at = time.time() + 10.0
+                print("   SetMode after outage -> soft start 10 s", flush=True)
             self.mode = cfg.get("mode", self.mode)
             if self.mode == "Passive":
                 pc = cfg.get("passive_cfg", {})
@@ -164,6 +176,9 @@ class Proto(asyncio.DatagramProtocol):
         asyncio.ensure_future(self.process(data, addr))
 
     async def process(self, data: bytes, addr) -> None:
+        if time.time() < self.dev.outage_until:
+            print("   (outage: not answering)", flush=True)
+            return
         tt = self.dev.in_test()
         if tt is not None and tt < 36:
             if tt < 5:
@@ -234,6 +249,10 @@ async def household(args: argparse.Namespace, dev: VenusA) -> None:
         while True:
             await asyncio.sleep(1.0)
             t = time.time() - t0
+            if args.outage_at and t >= args.outage_at:
+                dev.outage, dev.outage_until = True, time.time() + args.outage_for
+                print(f"!! t={t:.0f}s output stage off (outage {args.outage_for:.0f} s)", flush=True)
+                args.outage_at = args.outage_at + args.outage_every if args.outage_every else 0
             if args.test_at and t >= args.test_at:
                 dev.test_t0 = time.time()
                 print(f"!! t={t:.0f}s device sensor test starts", flush=True)
@@ -286,6 +305,9 @@ async def main() -> None:
     ap.add_argument("--dropout-every", type=float, default=0.0)
     ap.add_argument("--dropout-residual", type=float, default=0.0)
     ap.add_argument("--test-at", type=float, default=0.0)
+    ap.add_argument("--outage-at", type=float, default=0.0)
+    ap.add_argument("--outage-every", type=float, default=0.0)
+    ap.add_argument("--outage-for", type=float, default=4.0)
     ap.add_argument("--test-every", type=float, default=0.0)
     ap.add_argument("--hang-after", type=int, default=0)
     ap.add_argument("--hang-for", type=float, default=40.0)

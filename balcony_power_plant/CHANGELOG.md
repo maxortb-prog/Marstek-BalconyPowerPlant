@@ -3,6 +3,27 @@
 All notable changes to this add-on. / Alle Änderungen an diesem Add-on.
 Format: [Keep a Changelog](https://keepachangelog.com), [Semantic Versioning](https://semver.org).
 
+## [0.3.12] – 2026-10-16
+
+### Changed / Geändert
+- **Repeated resend** during DEVICE_TEST and HOLD (with *Dropout resend setpoint*): the held
+  setpoint is re-sent every *Resend interval* s (new, default 5 s, 0 = off). Log of
+  2026-10-16: after the output stage switched off, the device resumed its output only ~10 s
+  after the first answered ES.SetMode – the guard (cd_time guard only) delayed this by ~45 s.
+  Log: "Device answers again after X s", "... N resends". Counter *Resends*.
+  / Sollwert wird während DEVICE_TEST und HOLD wiederholt gesendet, bis das Gerät zurück ist.
+- Simulator: `--outage-at/--outage-every/--outage-for` (output stage off until next SetMode)
+  Simulation (cap 150 W, load 180 W, 4 s outage): output missing 57–60 s without resend,
+  14–15 s with resend every 5 s. / Ausgang fehlt 57–60 s ohne, 14–15 s mit Resend.
+
+### Fixed / Behoben
+- Dropout detection missed a dropout right at the end of the settle time (reference window
+  already contained the jump). The grid level expected from the last setpoint change is now
+  used as an additional reference during the first 10 s after settling.
+  / Aussetzer direkt am Ende der Settle-Zeit wurde nicht erkannt – zusätzliche Referenz aus
+  dem erwarteten Netzwert nach der letzten Sollwertänderung.
+- HOLD → DEVICE_TEST keeps the event start time (log "answered again after X s").
+
 ## [0.3.11] – 2026-10-14
 
 ### Added / Neu

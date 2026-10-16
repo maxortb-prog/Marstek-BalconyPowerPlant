@@ -288,8 +288,9 @@ come back on). Reacting to it only causes a step afterwards (e.g. our 0 W → im
 - **export larger than the active setpoint + 30 W** – impossible by load changes (the grid can
   drop at most to −setpoint), so the device feeds in on its own.
 
-**State DEVICE_TEST**: everything is frozen – no regulation (also no export reaction), no
-commands (except the cd_time guard). If we changed the setpoint within the last 15 s (a
+**State DEVICE_TEST**: the regulation is frozen (also no export reaction). The held setpoint is
+re-sent every *Resend interval* s (default 5 s, 0 = only the cd_time guard): the device was
+observed to resume its output only ~10 s after the first ES.SetMode it answers again. If we changed the setpoint within the last 15 s (a
 reaction to the test itself), the previous setpoint is restored once.
 **End**: grid back at the level before for 5 s, no deviation within 30 s (false alarm), or
 *Device test hold time* (75 s). Then settle + fresh averaging.

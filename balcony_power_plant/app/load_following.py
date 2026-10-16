@@ -102,6 +102,7 @@ NUMBERS: dict[str, tuple[str, float, float, float, str | None, float]] = {
     "lf_jitter_pct":            ("Jitter amount", 5, 90, 5, "%", 50),
     "lf_jitter_interval":       ("Jitter interval", 30, 3600, 10, "s", 120),
     "lf_device_test_hold":      ("Device test hold time", 30, 300, 5, "s", 75),
+    "lf_resend_interval":       ("Resend interval", 0, 60, 1, "s", 5),
 }
 
 # option key -> (HA name, default)
@@ -135,7 +136,11 @@ class LoadFollower:
                          "suspected_dropouts": 0, "sensor_values": 0, "invalid_values": 0,
                          "dropouts": 0, "dropout_recoveries": 0, "dropout_timeouts": 0,
                          "jitter_probes": 0, "jitter_followed": 0, "jitter_not_followed": 0,
-                         "jitter_inconclusive": 0, "device_tests": 0}
+                         "jitter_inconclusive": 0, "device_tests": 0, "resends": 0}
+        # repeated resend during DEVICE_TEST / HOLD
+        self._event_start: float | None = None
+        self._event_resends = 0
+        self._event_answered: float | None = None
         # device test guard
         self.test_start: float | None = None
         self.test_level: float | None = None
@@ -153,6 +158,7 @@ class LoadFollower:
         self._last_dropout_at: float | None = None
         self.dropout_interval: int | None = None
         self._candidate_level: float | None = None
+        self._expected_grid: float | None = None
         self._check: dict[str, Any] | None = None     # pending plausibility check
         self._strikes = 0
         self._dirty = True
@@ -521,9 +527,12 @@ class LoadFollower:
         self._test_deviated = False
         self._test_back_since = None
         self.jitter = None
+        from_hold = self.hold_start is not None
         self.hold_start = self.hold_level = None
         self._candidate_until = None
         self.counters["device_tests"] += 1
+        if not (from_hold and self._event_start is not None):
+            self._event_begin(now)      # HOLD -> DEVICE_TEST keeps the event start
         if (now - self.last_change < TEST_REVERT_WINDOW and self._sp_before_change is not None
                 and self._sp_before_change != self.setpoint):
             # our last change was a reaction to the test itself -> undo it
@@ -558,8 +567,9 @@ class LoadFollower:
             end_reason = "hold time over"
         if end_reason:
             self.last_device_test_s = round(elapsed, 1)
-            _LOG.info("Device test over after %.0f s (%s, grid %+.0f W) - regulating again",
-                      elapsed, end_reason, latest)
+            _LOG.info("Device test over after %.0f s (%s, grid %+.0f W%s) - regulating again",
+                      elapsed, end_reason, latest, self._event_summary(now))
+            self._event_start = None
             self.test_start = self.test_level = None
             self.last_change = now                # settle + fresh averaging windows
             self.settle_until = now + self.o("lf_settle_time")
@@ -567,9 +577,41 @@ class LoadFollower:
             self._dirty = True
             return True
         self._set_state(DEVICE_TEST)
+        if self._resend(now, "device test resend"):
+            return True
         if now - self.last_send >= self.o("lf_cd_time") - CD_TIME_GUARD and self.setpoint is not None:
             self.counters["keepalives"] += 1
             self._send(self.setpoint, "keepalive (cd_time guard)", change=False)
+        return True
+
+    # ------------------------------------------------------ repeated resend
+    def _event_begin(self, now: float) -> None:
+        self._event_start, self._event_resends, self._event_answered = now, 0, None
+
+    def _event_summary(self, now: float) -> str:
+        if self._event_start is None:
+            return ""
+        ans = ("not answered" if self._event_answered is None
+               else f"device answered again after {self._event_answered - self._event_start:.0f} s")
+        return f", {self._event_resends} resends, {ans}"
+
+    def _resend(self, now: float, reason: str, force: bool = False) -> bool:
+        """Send the held setpoint again every lf_resend_interval s (0 = off).
+        The device seems to resume its output only after a SetMode it answers."""
+        interval = self.o("lf_resend_interval")
+        if self.setpoint is None:
+            return False
+        if not force and (interval <= 0 or now - self.last_send < interval):
+            return False
+        self._event_resends += 1
+        self.counters["resends"] += 1
+
+        def answered() -> None:
+            if self._event_start is not None and self._event_answered is None:
+                self._event_answered = time.monotonic()
+                _LOG.info("Device answers again %.0f s after the start of the event - output should "
+                          "follow within its soft start", self._event_answered - self._event_start)
+        self._send(self.setpoint, reason, change=False, on_answer=answered)
         return True
 
     # ---------------------------------------------------- keep-alive jitter
@@ -678,6 +720,12 @@ class LoadFollower:
         if t_last - before_start < DROPOUT_MIN_REF:
             return False
         before = self._integrate(before_start, t_last)
+        # shortly after settling the reference window may already contain the jump
+        # (dropout right at the end of the settle time) -> also use the grid level
+        # expected from the last setpoint change
+        if (before is not None and self._expected_grid is not None
+                and t_last - settle_end < 10.0):
+            before = min(before, self._expected_grid + DROPOUT_UNDERSHOOT)
         if self._candidate_until is not None and self._candidate_level is not None:
             before = self._candidate_level      # compare with the level before the ramp
         if before is None:
@@ -698,6 +746,7 @@ class LoadFollower:
             return False
         self._candidate_until = None
         self.hold_start, self.hold_level = now, before
+        self._event_begin(now)
         self.counters["dropouts"] += 1
         interval = None if self._last_dropout_at is None else now - self._last_dropout_at
         self._last_dropout_at = now
@@ -711,7 +760,7 @@ class LoadFollower:
         self._set_state(HOLD)
         self._dirty = True
         if self.sw("lf_dropout_resend"):
-            self._send(sp, "dropout resend", change=False)
+            self._resend(now, "dropout resend", force=True)
         return True
 
     def _hold(self, now: float, lower: float) -> bool:
@@ -722,9 +771,11 @@ class LoadFollower:
         if abs(latest - self.hold_level) <= self._tolerance():
             self.last_dropout_s = round(held_for, 1)
             self.counters["dropout_recoveries"] += 1
-            _LOG.info("Dropout recovered after %.0f s (grid %+.0f W)%s - restarting averaging",
+            _LOG.info("Dropout recovered after %.0f s (grid %+.0f W)%s%s - restarting averaging",
                       held_for, latest,
-                      "" if self.sw("lf_dropout_resend") else " by itself (quiet hold)")
+                      "" if self.sw("lf_dropout_resend") else " by itself (quiet hold)",
+                      self._event_summary(now))
+            self._event_start = None
             self.hold_start = self.hold_level = None
             self.last_change = now            # settle + fresh averaging windows
             self.settle_until = now + self.o("lf_settle_time")
@@ -734,8 +785,9 @@ class LoadFollower:
         if held_for >= self.o("lf_dropout_hold"):
             self.last_dropout_s = round(held_for, 1)
             self.counters["dropout_timeouts"] += 1
-            _LOG.warning("Dropout hold timed out after %.0f s - treating it as a real load "
-                         "change, regulating normally", held_for)
+            _LOG.warning("Dropout hold timed out after %.0f s%s - treating it as a real load "
+                         "change, regulating normally", held_for, self._event_summary(now))
+            self._event_start = None
             self.hold_start = self.hold_level = None
             self._dirty = True
             if not self.sw("lf_dropout_resend") and self.setpoint:
@@ -755,7 +807,8 @@ class LoadFollower:
             return False
         self._set_state(HOLD)
         if self.sw("lf_dropout_resend"):
-            self._keepalive(now)
+            if not self._resend(now, "dropout resend (repeat)"):
+                self._keepalive(now)
         elif now - self.last_send >= self.o("lf_cd_time") - CD_TIME_GUARD and self.setpoint is not None:
             # quiet hold: only send if cd_time would otherwise expire
             self.counters["keepalives"] += 1
@@ -823,7 +876,8 @@ class LoadFollower:
         interval = self.o("lf_cd_time") * self.o("lf_keepalive_pct") / 100.0
         return max(0.0, round(interval - (time.monotonic() - self.last_send), 1))
 
-    def _send(self, power: int, reason: str, change: bool, count: bool = True) -> None:
+    def _send(self, power: int, reason: str, change: bool, count: bool = True,
+              on_answer=None) -> None:
         cd_time = int(self.o("lf_cd_time"))
         now = time.monotonic()
         old = self.setpoint
@@ -832,6 +886,10 @@ class LoadFollower:
         if change:
             if old != power:
                 self._sp_before_change = old
+            # expected grid level once the device has followed this change
+            # (reference for the dropout detection right after settling)
+            if self.samples:
+                self._expected_grid = self.samples[-1][1] + (old or 0) - power
             delta = power - (old or 0)
             self._last_dir = (delta > 0) - (delta < 0)
             self.settle_until = now + self.settle_for(delta)
@@ -848,6 +906,8 @@ class LoadFollower:
         async def handler(result: dict[str, Any], late: bool) -> None:
             if str(result.get("set_result")).lower() not in ("true", "1", "ture"):
                 _LOG.error("Setpoint %d W rejected by device: %s", power, result)
+            elif on_answer is not None:
+                on_answer()
 
         self.b.udp.submit(
             "ES.SetMode",

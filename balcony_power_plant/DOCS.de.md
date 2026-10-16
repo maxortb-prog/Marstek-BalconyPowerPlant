@@ -292,8 +292,10 @@ insgesamt, die LED kann wieder angehen). Darauf zu reagieren erzeugt nur danach 
 - **Einspeisung größer als der aktive Sollwert + 30 W** – durch Laständerungen unmöglich (das
   Netz kann höchstens auf −Sollwert fallen), das Gerät speist also auf eigene Faust ein.
 
-**Zustand DEVICE_TEST**: alles eingefroren – keine Regelung (auch keine Reaktion auf
-Einspeisung), keine Befehle (außer dem cd_time-Schutz). Haben wir in den letzten 15 s den
+**Zustand DEVICE_TEST**: die Regelung ist eingefroren (auch keine Reaktion auf Einspeisung). Der
+gehaltene Sollwert wird alle *Resend interval* s erneut gesendet (Standard 5 s, 0 = nur cd_time-
+Schutz): beobachtet wurde, dass das Gerät seine Ausgabe erst ~10 s nach dem ersten wieder
+beantworteten ES.SetMode fortsetzt. Haben wir in den letzten 15 s den
 Sollwert geändert (eine Reaktion auf den Test selbst), wird der vorherige Wert einmal
 wiederhergestellt.
 **Ende**: Netz 5 s wieder auf dem Niveau davor, keine Abweichung innerhalb 30 s (Fehlalarm)

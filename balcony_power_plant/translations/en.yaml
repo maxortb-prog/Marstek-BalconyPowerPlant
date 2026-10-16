@@ -159,6 +159,9 @@ configuration:
   lf_device_test_hold:
     name: "Device test hold time"
     description: "s, maximum freeze time of the device test guard."
+  lf_resend_interval:
+    name: "Resend interval"
+    description: "s, during DEVICE_TEST and HOLD the setpoint is re-sent this often until the device is back (0 = off)."
   log_level:
     name: "Log level"
     description: "trace, debug, info, warning, error"

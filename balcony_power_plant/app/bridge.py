@@ -447,6 +447,7 @@ class Bridge:
             ("jitter_not_followed", "Jitter not followed", "mdi:close-circle-outline"),
             ("jitter_inconclusive", "Jitter inconclusive", "mdi:help-circle-outline"),
             ("device_tests", "Device tests", "mdi:test-tube"),
+            ("resends", "Resends", "mdi:send-clock"),
         ):
             add("sensor", f"lf_{key}", name, stat_t=st,
                 val_tpl=f"{{{{ value_json.{key} }}}}", stat_cla="total_increasing",
